@@ -80,6 +80,15 @@ async function loadFreshHealthModulesForTest() {
       return Object.entries(testStore).map(([sessionKey, entry]) => ({ sessionKey, entry }));
     },
   }));
+  vi.doMock("../config/sessions/session-sqlite-target.js", () => ({
+    resolveSqliteTargetFromSessionStorePath: (
+      storePath: string,
+      options?: { agentId?: string },
+    ) => ({
+      ...(options?.agentId ? { agentId: options.agentId } : {}),
+      path: `/tmp/openclaw-agent.${options?.agentId ?? "main"}.sqlite`,
+    }),
+  }));
   vi.doMock("../plugins/runtime/runtime-web-channel-plugin.js", () => ({
     webAuthExists: vi.fn(async () => true),
     getWebAuthAgeMs: vi.fn(() => 1234),
@@ -1074,11 +1083,16 @@ describe("collectGatewayHealthSnapshot", () => {
     };
     testStore = {};
 
-    await getHealthSnapshot({ timeoutMs: 10, probe: false });
+    const snap = await getHealthSnapshot({ timeoutMs: 10, probe: false });
 
     expect(listHealthSessionEntriesCalls).toEqual([
       { agentId: "main", storePath: "/tmp/sessions.json" },
       { agentId: "ops", storePath: "/tmp/sessions.json" },
     ]);
+    // The snapshot reports the resolved SQLite store, not the legacy JSON locator.
+    expect(snap.sessions.path).toBe("/tmp/openclaw-agent.main.sqlite");
+    const byAgent = new Map(snap.agents.map((agent) => [agent.agentId, agent] as const));
+    expect(byAgent.get("main")?.sessions.path).toBe("/tmp/openclaw-agent.main.sqlite");
+    expect(byAgent.get("ops")?.sessions.path).toBe("/tmp/openclaw-agent.ops.sqlite");
   });
 });
