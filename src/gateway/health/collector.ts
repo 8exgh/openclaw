@@ -136,9 +136,10 @@ export async function buildHealthSessionSummary(storePath: string, agentId?: str
   // The configured store path is a legacy JSON locator; entries are read from
   // the resolved SQLite database, so report that path instead of a file that
   // may not exist.
-  const resolvedTarget = resolveSqliteTargetFromSessionStorePath(storePath, {
-    ...(agentId ? { agentId } : {}),
-  });
+  const resolvedTarget = resolveSqliteTargetFromSessionStorePath(
+    storePath,
+    agentId ? { agentId } : {},
+  );
   return {
     path: resolvedTarget.path,
     count: sessions.length,
