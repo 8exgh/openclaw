@@ -5092,7 +5092,7 @@ export const en: TranslationMap = {
         usageCredits: "Usage credits",
         budgetValue: "{used} of {limit}",
         limitFiveHour: "5-hour limit",
-        limitWeekly: "Weekly · all models",
+        limitWeekly: "Weekly",
         limitDaily: "Daily limit",
         limitHours: "{hours}-hour limit",
       },
@@ -5151,6 +5151,7 @@ export const en: TranslationMap = {
     },
     attachments: {
       attachedFile: "Attached file",
+      showInTextField: "Show in text field",
       outsideAllowedFolders: "Outside allowed folders",
       unavailable: "Unavailable",
       checking: "Checking...",
