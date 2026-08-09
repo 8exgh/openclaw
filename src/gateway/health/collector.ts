@@ -25,7 +25,6 @@ import { normalizeAgentId } from "../../routing/session-key.js";
 import {
   DEFAULT_CHANNEL_CONNECT_GRACE_MS,
   DEFAULT_CHANNEL_STALE_EVENT_THRESHOLD_MS,
-  evaluateChannelHealth,
   resolveChannelHealthState,
 } from "../channel-health-policy.js";
 import type { GatewayHotReloadStatus } from "../config-reload-status.types.js";
@@ -339,13 +338,12 @@ export async function collectGatewayHealthSnapshot(params: {
       if (lastProbeAt) {
         snapshot.lastProbeAt = lastProbeAt;
       }
-      const health = evaluateChannelHealth(snapshot, {
+      const healthState = resolveChannelHealthState(snapshot, {
         channelId: plugin.id,
         now: Date.now(),
         staleEventThresholdMs: DEFAULT_CHANNEL_STALE_EVENT_THRESHOLD_MS,
         channelConnectGraceMs: DEFAULT_CHANNEL_CONNECT_GRACE_MS,
       });
-      const healthState = resolveChannelHealthState(snapshot, health);
       if (healthState !== undefined) {
         snapshot.healthState = healthState;
       }
