@@ -13,6 +13,7 @@ import { resolveDoctorContributionHealthChecks } from "./doctor-health-contribut
 import {
   createDoctorHealthContribution,
   resolveDoctorHealthContributions,
+  runDoctorHealthContributionList,
 } from "./doctor-health-contributions.test-support.js";
 import { runDoctorLintChecks } from "./doctor-lint-flow.js";
 import type { HealthCheck, HealthFinding } from "./health-checks.js";
@@ -38,6 +39,11 @@ const mocks = vi.hoisted(() => ({
     migrated: 0,
     warnings: [],
   }),
+  maybeMigrateModelCatalogCredentials: vi.fn(async () => ({
+    detected: 0,
+    migrated: 0,
+    warnings: [],
+  })),
   maybeRepairGatewayDaemon: vi.fn().mockResolvedValue(undefined),
   maybeRepairLegacyOAuthProfileIds: vi.fn(async (cfg: unknown) => cfg),
   maybeRepairLegacyOAuthSidecarProfiles: vi.fn().mockResolvedValue(undefined),
@@ -182,7 +188,6 @@ const mocks = vi.hoisted(() => ({
   resolveSystemdUserServiceAccount: vi.fn(() => "alice" as string | null),
   gatewayServiceIsLoaded: vi.fn(async () => true),
   resolveGatewayService: vi.fn(),
-  getSkillCuratorDoctorWarning: vi.fn(),
 }));
 
 vi.mock("../config/paths.js", async () => {
@@ -203,10 +208,6 @@ vi.mock("../commands/doctor/shared/plugin-runtime-symlinks.js", () => ({
 
 vi.mock("./bundled-health-checks.js", () => ({
   registerBundledHealthChecks: mocks.registerBundledHealthChecks,
-}));
-
-vi.mock("../skills/workshop/curator.js", () => ({
-  getSkillCuratorDoctorWarning: mocks.getSkillCuratorDoctorWarning,
 }));
 
 vi.mock("./doctor-repair-flow.js", () => ({
@@ -245,6 +246,10 @@ vi.mock("../commands/doctor-auth-flat-profiles.js", () => ({
 
 vi.mock("../commands/doctor-plugin-model-catalog.js", () => ({
   maybeMigrateLegacyPluginModelCatalogs: mocks.maybeMigrateLegacyPluginModelCatalogs,
+}));
+
+vi.mock("../commands/doctor-model-catalog-credentials.js", () => ({
+  maybeMigrateModelCatalogCredentials: mocks.maybeMigrateModelCatalogCredentials,
 }));
 
 vi.mock("../commands/doctor-gateway-daemon-flow.js", () => ({
@@ -807,6 +812,43 @@ describe("doctor health contributions", () => {
     vi.restoreAllMocks();
   });
 
+  it("continues after one doctor contribution throws", async () => {
+    const laterRun = vi.fn(async () => undefined);
+    const contributions = [
+      createDoctorHealthContribution({
+        id: "doctor:test-failure",
+        label: "Test failure",
+        run: async () => {
+          throw new Error("media migration required");
+        },
+      }),
+      createDoctorHealthContribution({
+        id: "doctor:test-later",
+        label: "Test later",
+        run: laterRun,
+      }),
+    ];
+    const ctx = {
+      cfg: {},
+      cfgForPersistence: {},
+      configResult: { cfg: {} },
+      configPath: "/tmp/fake-openclaw.json",
+      sourceConfigValid: true,
+      prompter: buildDoctorPrompter(true),
+      runtime: { log: vi.fn(), error: vi.fn(), exit: vi.fn() },
+      options: {},
+      env: {},
+    } as DoctorContributionRunContext;
+
+    await runDoctorHealthContributionList(ctx, contributions);
+
+    expect(laterRun).toHaveBeenCalledOnce();
+    expect(mocks.note).toHaveBeenCalledWith(
+      "doctor:test-failure run failed: media migration required",
+      "Doctor warnings",
+    );
+  });
+
   it("keeps legacy plugin manifest lint opt-in for structured findings", async () => {
     const contribution = requireDoctorContribution("doctor:legacy-plugin-manifests");
     const check = contribution.healthChecks[0] as HealthCheck & { defaultEnabled?: boolean };
@@ -1222,27 +1264,6 @@ describe("doctor health contributions", () => {
 
     expect(ids.indexOf("doctor:skills")).toBeGreaterThan(-1);
     expect(ids.indexOf("doctor:skills")).toBeLessThan(ids.indexOf("doctor:write-config"));
-  });
-
-  it("reports a wedged skill curator as a warning finding", async () => {
-    mocks.getSkillCuratorDoctorWarning.mockReturnValueOnce(
-      "skill curator has not completed a sweep since 2026-01-01 — check gateway logs",
-    );
-    const contribution = requireDoctorContribution("doctor:skill-curator");
-    const check = contribution.healthChecks[0] as HealthCheck;
-    const findings = await check.detect({
-      cfg: {},
-      mode: "doctor",
-      runtime: { log: vi.fn(), error: vi.fn(), exit: vi.fn() },
-    });
-
-    expect(findings).toEqual([
-      expect.objectContaining({
-        checkId: "core/doctor/skill-curator",
-        severity: "warning",
-        target: "skill-curator",
-      }),
-    ]);
   });
 
   it("keeps workspace status opt-in for structured lint selection", async () => {
@@ -1726,10 +1747,21 @@ describe("doctor health contributions", () => {
 
     await contribution.run(ctx);
 
-    expect(mocks.detectLegacyStateMigrations).toHaveBeenCalledWith({ cfg });
+    const detectParams = mocks.detectLegacyStateMigrations.mock.calls[0]?.[0] as
+      | {
+          legacySessionSurfaces?: unknown;
+        }
+      | undefined;
+    const legacySessionSurfaces = detectParams?.legacySessionSurfaces;
+    expect(legacySessionSurfaces).toMatchObject({ failures: [], surfaces: expect.any(Array) });
+    expect(mocks.detectLegacyStateMigrations).toHaveBeenCalledWith({
+      cfg,
+      legacySessionSurfaces,
+    });
     expect(mocks.runLegacyStateMigrations).toHaveBeenCalledWith({
       detected,
       config: cfg,
+      legacySessionSurfaces,
       recoverCorruptTargetStore: false,
     });
   });
@@ -1830,14 +1862,23 @@ describe("doctor health contributions", () => {
 
     await contribution.run(ctx);
 
+    const detectParams = mocks.detectLegacyStateMigrations.mock.calls[0]?.[0] as
+      | {
+          legacySessionSurfaces?: unknown;
+        }
+      | undefined;
+    const legacySessionSurfaces = detectParams?.legacySessionSurfaces;
+    expect(legacySessionSurfaces).toMatchObject({ failures: [], surfaces: expect.any(Array) });
     expect(mocks.detectLegacyStateMigrations).toHaveBeenCalledWith({
       cfg,
       doctorOnlyStateMigrations: true,
+      legacySessionSurfaces,
     });
     expect(mocks.runLegacyStateMigrations).toHaveBeenCalledWith({
       detected,
       config: cfg,
       doctorOnlyStateMigrations: true,
+      legacySessionSurfaces,
       recoverCorruptTargetStore: true,
     });
   });
@@ -1922,6 +1963,11 @@ describe("doctor health contributions", () => {
       mocks.maybeMigrateAuthProfileJsonStoresToSqlite.mock.invocationCallOrder[0]!,
     );
     expect(mocks.maybeMigrateLegacyPluginModelCatalogs).toHaveBeenCalledWith({
+      cfg: ctx.cfg,
+      prompter: ctx.prompter,
+      runtime: ctx.runtime,
+    });
+    expect(mocks.maybeMigrateModelCatalogCredentials).toHaveBeenCalledWith({
       cfg: ctx.cfg,
       prompter: ctx.prompter,
       runtime: ctx.runtime,
@@ -2275,7 +2321,6 @@ describe("doctor health contributions", () => {
       {},
       expect.objectContaining({
         includeWorkspaceMemoryHealth: false,
-        skipQmdBinaryProbe: true,
         skipAuthProfileResolution: true,
         gatewayMemoryProbe: { checked: false, ready: false, skipped: true },
         noteFn: expect.any(Function),

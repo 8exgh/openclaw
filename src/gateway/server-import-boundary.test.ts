@@ -78,6 +78,9 @@ describe("gateway startup import boundaries", () => {
       expect(workerStartup).toContain(`import("./worker-environments/${workerModule}.js")`);
     }
     expect(serverImpl).not.toContain('from "../plugins/worker-provider-registry.js"');
+    expect(readSource("src/gateway/server-restart-readiness.ts")).toContain(
+      'import("../state/openclaw-database-preflight.js")',
+    );
     expect(workerStartup).toContain('import("../plugins/worker-provider-registry.js")');
     expect(serverImpl).not.toContain(
       'from "../../packages/gateway-protocol/src/schema/worker-admission.js"',
@@ -85,6 +88,13 @@ describe("gateway startup import boundaries", () => {
     expect(workerStartup).toContain(
       'import("../../packages/gateway-protocol/src/schema/worker-admission.js")',
     );
+  });
+
+  it("keeps channel startup maintenance on the loaded-only registry", () => {
+    const lifecycleStartup = readSource("src/channels/plugins/lifecycle-startup.ts");
+
+    expect(lifecycleStartup).toContain('from "./registry-loaded.js"');
+    expect(lifecycleStartup).not.toContain('from "./registry.js"');
   });
 
   it("defers retained plugin generation cleanup to the post-ready idle scheduler", () => {
