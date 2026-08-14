@@ -10,11 +10,18 @@ import {
   type NodeWorkerWorkspaceExecInput,
   type NodeWorkerWorkspaceExecResult,
 } from "../../worker/node-workspace-protocol.js";
+import {
+  NODE_WORKSPACE_TRANSFER_ERROR_CODE,
+  NodeWorkerWorkspaceTransferError,
+} from "../../worker/node-workspace-transfer-protocol.js";
 import type {
   NodeWorkerSupervisorNodeProof,
   NodeWorkerSupervisorTransport,
 } from "../node-registry-private.js";
-import { createNodeWorkerWorkspaceFallback } from "./node-worker-workspace-fallback.js";
+import {
+  createNodeWorkerWorkspaceFallback,
+  recordNodeSyncPath,
+} from "./node-worker-workspace-fallback.js";
 import type { NodeWorkspaceTransferService } from "./node-workspace-transfer-service.js";
 import type { WorkerEnvironmentRecord } from "./store.js";
 import type {
@@ -64,6 +71,7 @@ type NodeWorkerLaunch = (request: {
   isCancellationAuthorized: () => boolean;
   timeoutMs: number;
   signal?: AbortSignal;
+  onDispatchReady?: () => void;
 }) => Promise<TerminalNodeWorkerSupervisorReceipt>;
 
 type NodeWorkerWorkspaceBinding = {
@@ -206,10 +214,11 @@ export function createNodeWorkerTunnelManager(options: NodeWorkerTunnelManagerOp
     );
   };
 
+  const isLiveEntry = (entry: NodeTunnelEntry): boolean =>
+    entries.get(entry.environmentId) === entry && !entry.abortController.signal.aborted;
+
   const isEnvironmentOwner = (entry: NodeTunnelEntry): boolean =>
-    hasDurableBinding(entry) &&
-    entries.get(entry.environmentId) === entry &&
-    !entry.abortController.signal.aborted;
+    hasDurableBinding(entry) && isLiveEntry(entry);
 
   const findNode = async (
     entry: NodeTunnelEntry,
@@ -288,13 +297,17 @@ export function createNodeWorkerTunnelManager(options: NodeWorkerTunnelManagerOp
       }
       if (!result.ok) {
         const code = result.error?.code ?? "UNAVAILABLE";
+        if (code === NODE_WORKSPACE_TRANSFER_ERROR_CODE) {
+          throw new NodeWorkerWorkspaceTransferError(
+            result.error?.message ?? "workspace-transfer-failed: transfer did not complete",
+          );
+        }
         if (command.transportRetry === "idempotent" && RETRYABLE_TRANSPORT_CODES.has(code)) {
           await sleepWithAbort(Math.min(RETRY_DELAY_MS, remainingMs), signal);
           continue;
         }
         throw new Error(
-          result.error?.message &&
-            (code === "INVALID_REQUEST" || result.error.message.startsWith("workspace-transfer-"))
+          result.error?.message && code === "INVALID_REQUEST"
             ? `node workspace command failed (${code}): ${result.error.message}`
             : `node workspace command failed (${code})`,
         );
@@ -355,7 +368,9 @@ export function createNodeWorkerTunnelManager(options: NodeWorkerTunnelManagerOp
         sessionId: entry.sessionId,
         generation: entry.ownerEpoch,
         localPath: restoredWorkspace.localPath,
-        isAuthorized: () => isEnvironmentOwner(entry as NodeTunnelEntry),
+        // The transfer service re-reads the durable environment and credential together.
+        // This closure fences the exact in-memory tunnel instance without duplicating that read.
+        isAuthorized: () => isLiveEntry(entry as NodeTunnelEntry),
         signal: entry.abortController.signal,
       });
       options.workspaceTransfer.revoke(entry.environmentId, prepared.token);
@@ -534,6 +549,7 @@ export function createNodeWorkerTunnelManager(options: NodeWorkerTunnelManagerOp
           isDispatchAuthorized,
           isCancellationAuthorized: () => hasDurableBinding(entry as NodeTunnelEntry),
           timeoutMs: request.timeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS,
+          onDispatchReady: request.onDispatchReady,
           signal: request.signal
             ? AbortSignal.any([entry.abortController.signal, request.signal])
             : entry.abortController.signal,
@@ -555,13 +571,16 @@ export function createNodeWorkerTunnelManager(options: NodeWorkerTunnelManagerOp
             sessionId: entry.sessionId,
             generation: entry.ownerEpoch,
             localPath: request.localPath,
-            isAuthorized: () => isEnvironmentOwner(entry as NodeTunnelEntry),
+            // Durable owner state is revalidated by the transfer service after every awaited I/O.
+            isAuthorized: () => isLiveEntry(entry as NodeTunnelEntry),
             signal: entry.abortController.signal,
           });
           try {
+            const originStartedAt = performance.now();
             const origin = await workspace.trySyncWorkspace(request, prepared.snapshot.manifestRef);
-            if (origin) {
-              return origin;
+            recordNodeSyncPath(entry.environmentId, entry.sessionId, origin, originStartedAt);
+            if (origin.kind === "synced") {
+              return origin.result;
             }
             const transferred = await exec({
               argv: ["openclaw-internal-workspace-transfer"],

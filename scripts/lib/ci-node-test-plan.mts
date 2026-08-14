@@ -167,17 +167,18 @@ const MAX_BUNDLED_NODE_TEST_PATTERNS = 64;
 // Keep runner classes and subprocess isolation intact while bounding each combined job.
 // The group hints below are loaded-fleet CI walls. Three-way striping plus a
 // Blacksmith keeps the proven 200s/276s admission caps and 28-worker ceiling.
-// Standard 4-core GitHub runners use direct hosted wall hints below. The
-// 160-second wall budget is the hosted-hint equivalent of tightening the old
-// 120/166 admission caps to 80/110, leaving setup inside a ~3.5-minute lane.
+// Standard 4-core GitHub runners use direct hosted wall hints below. These
+// budgets target roughly 160 seconds of predicted body work, leaving the
+// measured ~70-second setup overhead inside a roughly 230-second lane.
 const COMPACT_LARGE_NODE_TEST_JOB_SECONDS = 200;
 const COMPACT_SMALL_NODE_TEST_JOB_SECONDS = 276;
-const COMPACT_GITHUB_LARGE_NODE_TEST_JOB_SECONDS = 160;
-const COMPACT_GITHUB_SMALL_NODE_TEST_JOB_SECONDS = 160;
+const COMPACT_GITHUB_LARGE_NODE_TEST_JOB_SECONDS = 90;
+const COMPACT_GITHUB_SMALL_NODE_TEST_JOB_SECONDS = 95;
 const COMPACT_GITHUB_GROUP_SECONDS_SCALE = 1.6;
 const COMPACT_GITHUB_MAX_PREDICTED_SECONDS = 210;
+const COMPACT_GITHUB_NODE_TEST_JOB_CAP = 96;
 const COMPACT_NODE_TEST_JOB_GROUPS = 10;
-const COMPACT_TOOLING_NODE_TEST_GROUPS = 4;
+const COMPACT_TOOLING_NODE_TEST_GROUPS = 5;
 const COMPACT_WHOLE_NODE_TEST_TIMEOUT_MINUTES = 120;
 // Route measured queue-tail bins to existing 8-vCPU capacity after packing so
 // the planner keeps the same groups, coverage, and runner-registration count.
@@ -310,10 +311,13 @@ const COMPACT_GROUP_SECONDS_HINTS = new Map<string, number>([
   // This dist-only group is outside the sampled nondist logs and retains its
   // prior measured hint. The exclusive-bin cap keeps its lane lightly packed.
   ["core-runtime-tui-pty", 116],
-  ["core-tooling-1", 127],
-  ["core-tooling-2", 121],
-  ["core-tooling-3", 203],
-  ["core-tooling-4", 157],
+  // Run 31789504347 attempt 1 put the old tooling cohort on the compact tail
+  // at 267s. Five balanced stripes project that three-way cohort to ~160s.
+  ["core-tooling-1", 160],
+  ["core-tooling-2", 160],
+  ["core-tooling-3", 160],
+  ["core-tooling-4", 160],
+  ["core-tooling-5", 160],
   ["core-tooling-isolated", 37],
   ["core-unit-fast-1", 66],
   ["core-unit-fast-2", 64],
@@ -374,11 +378,12 @@ const COMPACT_LARGE_GROUP_STRIPE_SECONDS_HINTS = new Map<string, number>([
 ]);
 
 // Rounded medians from standard 4-core GitHub-hosted runs 31737316152,
-// 31742781948, 31749838728, and 31754493208. The last run exercised compact
-// bins; the earlier full-plan runs isolate the named groups. Exclude failed
-// samples and reject media-ui-3's 444s compact retry sample because its log
-// records a 300s no-output timeout; its three healthy samples are 52-63s.
-// Unmeasured groups use the scale above.
+// 31742781948, 31749838728, 31754493208, 31776290645, 31784022043, and
+// 31784883914. Exclude failed samples and reject media-ui-3's 444s compact
+// retry sample because its log records a 300s no-output timeout; its three
+// healthy samples are 52-63s. Tooling uses the five-way projection above
+// until the reshuffled groups have direct samples. Unmeasured groups use the
+// scale above.
 const COMPACT_GITHUB_GROUP_SECONDS_HINTS = new Map<string, number>([
   ["agentic-agents-core-auth", 50],
   ["agentic-agents-core-isolated", 23],
@@ -484,10 +489,11 @@ const COMPACT_GITHUB_GROUP_SECONDS_HINTS = new Map<string, number>([
   ["core-runtime-media-ui-support", 101],
   ["core-runtime-secrets", 73],
   ["core-runtime-shared", 92],
-  ["core-tooling-1", 210],
-  ["core-tooling-2", 181],
-  ["core-tooling-3", 335],
-  ["core-tooling-4", 183],
+  ["core-tooling-1", 160],
+  ["core-tooling-2", 160],
+  ["core-tooling-3", 160],
+  ["core-tooling-4", 160],
+  ["core-tooling-5", 160],
   ["core-tooling-isolated", 41],
   ["core-unit-fast-1", 85],
   ["core-unit-fast-2", 84],
@@ -553,6 +559,7 @@ const COMPACT_PUSH_EXCLUDED_SHARDS = new Set([
   "core-tooling-2",
   "core-tooling-3",
   "core-tooling-4",
+  "core-tooling-5",
   "core-tooling-isolated",
 ]);
 // Spawn/signal-timing suites (process-group waits, PTY smoke) flake when a
@@ -593,12 +600,16 @@ function estimateDefaultCompactGroupSeconds(group: NodeTestShardGroup): number {
   return DEFAULT_WHOLE_GROUP_SECONDS;
 }
 
+function usesGithubRunnerProfile(runnerBackend: string | undefined): boolean {
+  return runnerBackend === "github" || runnerBackend === "hybrid";
+}
+
 function estimateCompactGroupSeconds(
   group: NodeTestShardGroup,
   runnerBackend: string | undefined,
 ): number {
   const defaultSeconds = estimateDefaultCompactGroupSeconds(group);
-  if (runnerBackend !== "github") {
+  if (!usesGithubRunnerProfile(runnerBackend)) {
     return defaultSeconds;
   }
   return (
@@ -611,7 +622,7 @@ function estimateCompactStripeSeconds(
   group: NodeTestShardGroup,
   runnerBackend: string | undefined,
 ): number {
-  if (runnerBackend === "github") {
+  if (usesGithubRunnerProfile(runnerBackend)) {
     return estimateCompactGroupSeconds(group, runnerBackend);
   }
   return (
@@ -664,6 +675,7 @@ const FULL_NODE_TEST_ADMISSION_PRIORITY = new Map([
   ["core-tooling-2", 1],
   ["core-tooling-3", 1],
   ["core-tooling-4", 1],
+  ["core-tooling-5", 1],
 ]);
 // Commands and cron run non-isolated, so keep their split shards as separate
 // processes. Combining their include lists can retain test state across groups.
@@ -1094,7 +1106,6 @@ function resolveGatewayServerShardName(file: string): string {
   if (
     name.startsWith("server.control-ui-root") ||
     name.startsWith("server.ios-client-id") ||
-    name.startsWith("server.minimal-channel-pin") ||
     name.startsWith("server.tools-catalog")
   ) {
     return "agentic-control-plane-runtime-ui-tools";
@@ -2052,13 +2063,7 @@ function splitOversizedGithubCompactGroup(
     return [{ group, seconds }];
   }
 
-  // Hosted proof showed the old four-way tooling stripe remained imbalanced
-  // after a two-way split (126s versus 246s). Give that measured outlier a
-  // third stripe; the generic ceiling remains sufficient for other groups.
-  const stripeCount =
-    group.shard_name === "core-tooling-3"
-      ? 3
-      : Math.ceil(seconds / COMPACT_GITHUB_MAX_PREDICTED_SECONDS);
+  const stripeCount = Math.ceil(seconds / COMPACT_GITHUB_MAX_PREDICTED_SECONDS);
   const splitSeconds = Math.ceil(seconds / stripeCount);
   return createStripedBatches(includePatterns, stripeCount, stripeFileWeight).map(
     (patterns, index) => ({
@@ -2094,13 +2099,12 @@ function createCompactNodeTestShardBundles(
       runner,
       shard_name: shard.shardName,
     });
-    const plannedGroups =
-      options.runnerBackend === "github"
-        ? splitOversizedGithubCompactGroup(group)
-        : [{ group, seconds: estimateCompactGroupSeconds(group, options.runnerBackend) }];
+    const plannedGroups = usesGithubRunnerProfile(options.runnerBackend)
+      ? splitOversizedGithubCompactGroup(group)
+      : [{ group, seconds: estimateCompactGroupSeconds(group, options.runnerBackend) }];
     for (const planned of plannedGroups) {
       groups.push(planned.group);
-      if (options.runnerBackend === "github") {
+      if (usesGithubRunnerProfile(options.runnerBackend)) {
         hostedSplitSeconds.set(planned.group.shard_name, planned.seconds);
       }
     }
@@ -2128,7 +2132,7 @@ function createCompactNodeTestShardBundles(
       const exclusive = isExclusiveCompactGroup(group);
       const secondsCap = exclusive
         ? COMPACT_EXCLUSIVE_JOB_SECONDS
-        : options.runnerBackend === "github"
+        : usesGithubRunnerProfile(options.runnerBackend)
           ? group.runner.includes("-8vcpu-")
             ? COMPACT_GITHUB_LARGE_NODE_TEST_JOB_SECONDS
             : COMPACT_GITHUB_SMALL_NODE_TEST_JOB_SECONDS
@@ -2213,6 +2217,15 @@ function createCompactNodeTestShardBundles(
         predictedSeconds: bin.weight,
       });
     }
+  }
+
+  if (
+    usesGithubRunnerProfile(options.runnerBackend) &&
+    compactJobs.length > COMPACT_GITHUB_NODE_TEST_JOB_CAP
+  ) {
+    throw new Error(
+      `compact GitHub node test plan exceeds ${COMPACT_GITHUB_NODE_TEST_JOB_CAP} jobs`,
+    );
   }
 
   return compactJobs.toSorted((a, b) => a.checkName.localeCompare(b.checkName));
