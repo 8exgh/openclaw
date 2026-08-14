@@ -1,6 +1,8 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import { __setFsSafeTestHooksForTest } from "@openclaw/fs-safe/test-hooks";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { sha256Hex } from "../../infra/crypto-digest.js";
 import { closeOpenClawStateDatabaseForTest } from "../../state/openclaw-state-db.js";
 import { openOpenClawStateDatabase } from "../../state/openclaw-state-db.js";
@@ -16,8 +18,10 @@ import {
   reconcileSkillCollection,
   restoreLatestSkillCollectionBackup,
 } from "./collection-reconcile.js";
+import { stageSkillCollectionDrop } from "./collection-rollback.js";
 import { getArchivedSkillFiles } from "./curator.js";
 import { readSkillProposalTargetTreeSha256 } from "./proposal-bundle.js";
+import { inspectSkillProposal, listSkillProposals, proposeCreateSkill } from "./service.js";
 import { withSkillCollectionLock } from "./target-lock.js";
 
 type CopyDirectoryHook = (
@@ -64,16 +68,122 @@ beforeEach(async () => {
     layout: "state-only",
     prefix: "openclaw-skill-collection-state-",
   });
-  workspaceDir = await tempDirs.make("openclaw-skill-collection-workspace-");
+  workspaceDir = await fs.realpath(await tempDirs.make("openclaw-skill-collection-workspace-"));
 });
 
 afterEach(async () => {
+  __setFsSafeTestHooksForTest(undefined);
   closeOpenClawStateDatabaseForTest();
   await testState.cleanup();
   await tempDirs.cleanup();
 });
 
 describe("skill collection reconciliation", () => {
+  it.runIf(process.platform !== "win32")(
+    "keeps trusted external symlink targets outside the autonomous collection",
+    async () => {
+      const targetSkillsDir = await tempDirs.make("openclaw-skill-collection-readonly-target-");
+      const targetSkillDir = path.join(targetSkillsDir, "shared-skill");
+      await writeSkill({
+        dir: targetSkillDir,
+        name: "shared-skill",
+        description: "Shared read-only procedure",
+        body: "# Shared\n\nDo not rewrite this target.\n",
+      });
+      await fs.mkdir(path.join(workspaceDir, "skills"), { recursive: true });
+      await fs.symlink(targetSkillDir, path.join(workspaceDir, "skills", "shared-skill"), "dir");
+      const config = {
+        skills: {
+          load: { allowSymlinkTargets: [targetSkillsDir] },
+          workshop: { allowSymlinkTargetWrites: true },
+        },
+      };
+
+      expect(listWritableSkillCollection(workspaceDir, { config })).toEqual([]);
+      await expect(
+        stageSkillCollectionDrop({
+          workspaceDir,
+          name: "shared-skill",
+          baseDir: path.join(workspaceDir, "skills", "shared-skill"),
+        }),
+      ).rejects.toMatchObject({ code: "path-alias" });
+      await expect(fs.readFile(path.join(targetSkillDir, "SKILL.md"), "utf8")).resolves.toContain(
+        "Do not rewrite this target.",
+      );
+    },
+  );
+
+  it.runIf(process.platform !== "win32")(
+    "rejects a collection drop before traversing a trusted external skills root",
+    async () => {
+      const targetSkillsDir = await tempDirs.make("openclaw-skill-collection-external-root-");
+      const targetSkillDir = path.join(targetSkillsDir, "shared-skill");
+      await writeSkill({
+        dir: targetSkillDir,
+        name: "shared-skill",
+        description: "Shared external procedure",
+        body: "# Shared\n\nCanonical procedure.\n",
+      });
+      await fs.symlink(targetSkillsDir, path.join(workspaceDir, "skills"), "dir");
+      const config = {
+        skills: {
+          load: { allowSymlinkTargets: [targetSkillsDir] },
+          workshop: { allowSymlinkTargetWrites: true },
+        },
+      };
+
+      await expect(
+        reconcileSkillCollection({
+          workspaceDir,
+          config,
+          env: testState.env,
+          ...(await readCollectionReceipt(config)),
+          plan: [{ action: "drop", name: "shared-skill", reason: "must stay external" }],
+        }),
+      ).rejects.toThrow("Cannot drop a skill that does not exist");
+      await expect(fs.readFile(path.join(targetSkillDir, "SKILL.md"), "utf8")).resolves.toContain(
+        "Canonical procedure.",
+      );
+    },
+  );
+
+  it.runIf(process.platform !== "win32")(
+    "rejects a skills-root swap at the drop mutation boundary",
+    async () => {
+      await writeWorkspaceSkills(workspaceDir, [
+        { name: "procedure", description: "Workspace procedure" },
+      ]);
+      const outsideWorkspace = await tempDirs.make("openclaw-skill-collection-swap-target-");
+      await writeWorkspaceSkills(outsideWorkspace, [
+        { name: "procedure", description: "External procedure" },
+      ]);
+      const skillsDir = path.join(workspaceDir, "skills");
+      const displacedSkillsDir = path.join(workspaceDir, "skills-before-swap");
+      let swapped = false;
+      __setFsSafeTestHooksForTest({
+        beforeRootFallbackMutation: async (operation) => {
+          if (operation !== "move" || swapped) {
+            return;
+          }
+          swapped = true;
+          await fs.rename(skillsDir, displacedSkillsDir);
+          await fs.symlink(path.join(outsideWorkspace, "skills"), skillsDir, "dir");
+        },
+      });
+
+      await expect(
+        stageSkillCollectionDrop({
+          workspaceDir,
+          name: "procedure",
+          baseDir: path.join(skillsDir, "procedure"),
+        }),
+      ).rejects.toBeTruthy();
+      await expect(
+        fs.readFile(path.join(outsideWorkspace, "skills", "procedure", "SKILL.md"), "utf8"),
+      ).resolves.toContain("External procedure");
+    },
+  );
+
   it("consolidates a collection atomically and preserves one recoverable backup", async () => {
     await writeWorkspaceSkills(workspaceDir, [
       { name: "deploy-one", description: "First deploy notes", body: "# Deploy one\n" },
@@ -470,8 +580,7 @@ describe("skill collection reconciliation", () => {
         },
       ],
     });
-    const canonicalWorkspaceDir = await fs.realpath(workspaceDir);
-    const skillDir = path.join(canonicalWorkspaceDir, "skills", "procedure");
+    const skillDir = path.join(workspaceDir, "skills", "procedure");
     const skillFile = path.join(skillDir, "SKILL.md");
     const backupRoot = path.join(
       await fs.realpath(testState.stateDir),
@@ -521,7 +630,7 @@ describe("skill collection reconciliation", () => {
         },
       ],
     });
-    const skillDir = path.join(await fs.realpath(workspaceDir), "skills", "procedure");
+    const skillDir = path.join(workspaceDir, "skills", "procedure");
     const beforeVersion = getSkillsSnapshotVersion();
     copyDirectoryBefore.mockImplementation(async (source, destination) => {
       if (path.resolve(String(destination)) === path.resolve(skillDir)) {
@@ -634,6 +743,126 @@ describe("skill collection reconciliation", () => {
     await expect(fs.readFile(skillFile, "utf8")).resolves.toContain("# Original");
   });
 
+  it("keeps proposal reads behind a failed collection create rollback", async () => {
+    const proposal = await proposeCreateSkill({
+      workspaceDir,
+      env: testState.env,
+      name: "Collection Candidate",
+      description: "Remain pending if collection creation rolls back.",
+      content: "# Collection Candidate\n\nCreated by collection reconciliation.\n",
+    });
+    const receipt = await readCollectionReceipt();
+    const originalRename = fs.rename.bind(fs);
+    let releaseCommit: (() => void) | undefined;
+    let markCommitAttempted: (() => void) | undefined;
+    const commitAttempted = new Promise<void>((resolve) => {
+      markCommitAttempted = resolve;
+    });
+    const renameSpy = vi.spyOn(fs, "rename").mockImplementation(async (oldPath, newPath) => {
+      if (String(oldPath).includes(`${path.sep}.pending-`)) {
+        markCommitAttempted?.();
+        await new Promise<void>((resolve) => {
+          releaseCommit = resolve;
+        });
+        throw new Error("forced backup commit failure");
+      }
+      await originalRename(oldPath, newPath);
+    });
+
+    const reconciliation = reconcileSkillCollection({
+      workspaceDir,
+      env: testState.env,
+      ...receipt,
+      plan: [
+        {
+          action: "write",
+          name: proposal.record.target.skillKey,
+          description: "Created during a collection mutation.",
+          content: "# Collection Candidate\n\nTransient collection content.\n",
+        },
+      ],
+    });
+    try {
+      await commitAttempted;
+      let listSettled = false;
+      let inspectSettled = false;
+      const listing = listSkillProposals({ workspaceDir, env: testState.env }).finally(() => {
+        listSettled = true;
+      });
+      const inspection = inspectSkillProposal(proposal.record.id, {
+        workspaceDir,
+        env: testState.env,
+      }).finally(() => {
+        inspectSettled = true;
+      });
+
+      await new Promise((resolve) => {
+        setTimeout(resolve, 50);
+      });
+      expect(listSettled).toBe(false);
+      expect(inspectSettled).toBe(false);
+
+      releaseCommit?.();
+      await expect(reconciliation).rejects.toThrow("forced backup commit failure");
+      await expect(listing).resolves.toMatchObject({
+        proposals: [expect.objectContaining({ id: proposal.record.id, status: "pending" })],
+      });
+      await expect(inspection).resolves.toMatchObject({
+        record: { id: proposal.record.id, status: "pending" },
+      });
+    } finally {
+      releaseCommit?.();
+      renameSpy.mockRestore();
+    }
+
+    await expect(fs.access(proposal.record.target.skillFile)).rejects.toThrow();
+  });
+
+  it("surfaces proposal reads that exceed the collection lease wait", async () => {
+    const proposal = await proposeCreateSkill({
+      workspaceDir,
+      env: testState.env,
+      name: "Contended Candidate",
+      description: "Surface collection lock contention.",
+      content: "# Contended Candidate\n",
+    });
+    let releaseLock: (() => void) | undefined;
+    let markAcquired: (() => void) | undefined;
+    const acquired = new Promise<void>((resolve) => {
+      markAcquired = resolve;
+    });
+    const heldLock = withSkillCollectionLock(
+      workspaceDir,
+      async () => {
+        markAcquired?.();
+        await new Promise<void>((resolve) => {
+          releaseLock = resolve;
+        });
+      },
+      { env: testState.env },
+    );
+    await acquired;
+
+    try {
+      await Promise.all([
+        expect(listSkillProposals({ workspaceDir, env: testState.env })).rejects.toMatchObject({
+          code: "OPENCLAW_STATE_LEASE_TIMEOUT",
+        }),
+        expect(
+          inspectSkillProposal(proposal.record.id, {
+            workspaceDir,
+            env: testState.env,
+          }),
+        ).rejects.toMatchObject({
+          code: "OPENCLAW_STATE_LEASE_TIMEOUT",
+        }),
+      ]);
+    } finally {
+      releaseLock?.();
+      await heldLock;
+    }
+  }, 15_000);
+
   it("restores a staged drop when backup commit fails", async () => {
     await writeWorkspaceSkills(workspaceDir, [
       { name: "obsolete", description: "Obsolete procedure", body: "# Original\n" },
@@ -698,8 +927,8 @@ describe("skill collection reconciliation", () => {
   });
 });
 
-async function readCollectionReceipt() {
-  const skills = listWritableSkillCollection(workspaceDir);
+async function readCollectionReceipt(config?: OpenClawConfig) {
+  const skills = listWritableSkillCollection(workspaceDir, { config });
   return {
     readSkillHashes: new Map(
       await Promise.all(

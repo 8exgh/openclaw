@@ -64,7 +64,7 @@ import { configureAiTransportHost, getAiTransportHost } from "../host.js";
 import { cleanupSessionResources } from "../session-resources.js";
 import {
   createOpenAIResponsesWebSocketStream,
-  supportsNativeOpenAIResponsesWebSocket,
+  supportsNativeOpenAIResponsesEndpoint,
 } from "./openai-responses-websocket.js";
 
 const initialHost = getAiTransportHost();
@@ -83,6 +83,7 @@ const assistantOutput = {
   role: "assistant",
   status: "completed",
   content: [{ type: "output_text", text: "one", annotations: [] }],
+  phase: "final_answer",
 };
 
 function completion(responseId: string, output: Array<Record<string, unknown>> = []) {
@@ -111,17 +112,13 @@ async function consumeResponse(response: ReturnType<typeof createOpenAIResponses
   return events;
 }
 
-function createStream(
-  request: Record<string, unknown>,
-  overrides: { continuationItems?: Array<Record<string, unknown>>; sessionId?: string } = {},
-) {
+function createStream(request: Record<string, unknown>, overrides: { sessionId?: string } = {}) {
   return createOpenAIResponsesWebSocketStream({
     client,
     request,
     mode: "websocket-cached",
     sessionId: overrides.sessionId ?? "session-1",
     headers: { "x-stable-session": "session-1" },
-    resolveContinuationItems: () => (overrides.continuationItems ?? [assistantOutput]) as never,
   });
 }
 
@@ -142,7 +139,7 @@ describe("native OpenAI Responses WebSocket transport", () => {
 
   it("only enables WebSockets for the official native OpenAI Responses endpoint", () => {
     expect(
-      supportsNativeOpenAIResponsesWebSocket({
+      supportsNativeOpenAIResponsesEndpoint({
         provider: "openai",
         api: "openai-responses",
         baseUrl: "https://api.openai.com/v1",
@@ -159,7 +156,7 @@ describe("native OpenAI Responses WebSocket transport", () => {
     ["different provider", "azure-openai", "https://api.openai.com/v1"],
   ])("rejects %s", (_name, provider, baseUrl) => {
     expect(
-      supportsNativeOpenAIResponsesWebSocket({ provider, api: "openai-responses", baseUrl }),
+      supportsNativeOpenAIResponsesEndpoint({ provider, api: "openai-responses", baseUrl }),
     ).toBe(false);
   });
 
@@ -210,88 +207,30 @@ describe("native OpenAI Responses WebSocket transport", () => {
     });
   });
 
-  it("reuses a session socket and sends only a strict append-compatible input delta", async () => {
-    websocketState.responseBatches.push(
-      [completion("resp_1", [assistantOutput])],
-      [completion("resp_2")],
-    );
-    const stableRequest = {
-      model: "gpt-5.6-luna",
-      stream: true,
-      background: true,
-      store: false,
-      instructions: "stable prompt",
-      tools: [{ type: "function", name: "read", parameters: { type: "object" } }],
-      metadata: {
-        openclaw_session_id: "session-1",
-        openclaw_turn_id: "turn-1",
-        openclaw_turn_attempt: "1",
-      },
-      input: [firstUser],
-    };
-
-    const first = createStream(stableRequest);
-    expect(first.continuationStatus).toBe("no_previous_response");
-    expect(first.request).not.toHaveProperty("stream");
-    expect(first.request).not.toHaveProperty("background");
-    await consumeResponse(first);
-
-    const second = createStream({
-      ...stableRequest,
-      metadata: {
-        openclaw_session_id: "session-1",
-        openclaw_turn_id: "turn-2",
-        openclaw_turn_attempt: "1",
-      },
-      input: [
-        firstUser,
-        {
-          type: "message",
-          role: "assistant",
-          content: assistantOutput.content,
-        },
-        { role: "user", content: "second" },
-      ],
-    });
-    expect(second.continuationStatus).toBe("continued");
-    expect(second.request).toMatchObject({
-      previous_response_id: "resp_1",
-      input: [{ role: "user", content: "second" }],
-    });
-    await consumeResponse(second);
-
-    expect(websocketState.instances).toHaveLength(1);
-    expect(websocketState.requests).toHaveLength(2);
-    expect(websocketState.requests[1]).toMatchObject({
-      type: "response.create",
-      previous_response_id: "resp_1",
-      input: [{ role: "user", content: "second" }],
-    });
-    expect(websocketState.requests[0]).not.toHaveProperty("stream");
-    expect(websocketState.requests[0]).not.toHaveProperty("background");
-  });
-
-  it("uses the response id when persisted encrypted reasoning has a different replay shape", async () => {
+  it("continues across equivalent request ordering, omissions, and persisted reasoning replay", async () => {
     const reasoning = { type: "reasoning", id: "rs_1", encrypted_content: "ciphertext" };
     websocketState.responseBatches.push(
       [completion("resp_1", [reasoning, assistantOutput])],
       [completion("resp_2")],
     );
     await consumeResponse(
-      createStream(
-        { model: "gpt-5.6-luna", input: [firstUser] },
-        { continuationItems: [reasoning, assistantOutput] },
-      ),
+      createStream({
+        model: "gpt-5.6-luna",
+        metadata: { beta: "2", alpha: "1" },
+        max_output_tokens: undefined,
+        input: [firstUser],
+      }),
     );
 
     const second = createStream({
-      model: "gpt-5.6-luna",
       input: [
         firstUser,
         { type: "reasoning", summary: [] },
         assistantOutput,
         { role: "user", content: "second" },
       ],
+      metadata: { alpha: "1", beta: "2" },
+      model: "gpt-5.6-luna",
     });
 
     expect(second.continuationStatus).toBe("continued");
@@ -372,6 +311,17 @@ describe("native OpenAI Responses WebSocket transport", () => {
       mutate: (request: Record<string, unknown>) => ({
         ...request,
         input: [{ role: "user", content: "rewritten" }],
+      }),
+    },
+    {
+      name: "assistant phase change",
+      mutate: (request: Record<string, unknown>) => ({
+        ...request,
+        input: [
+          firstUser,
+          { ...assistantOutput, phase: "commentary" },
+          { role: "user", content: "second" },
+        ],
       }),
     },
   ])("resets continuation on $name", async ({ mutate }) => {

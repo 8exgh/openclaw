@@ -53,6 +53,13 @@ export const icons = {
     <path d="M9 10h6" />
     <path d="M12 13V7" />
     <path d="M9 17h6" />`),
+  diff: strokeIcon(svg` <path d="M12 3v14" />
+    <path d="M5 10h14" />
+    <path d="M5 21h14" />`),
+  braces: strokeIcon(svg` <path
+      d="M8 3H7a2 2 0 0 0-2 2v5a2 2 0 0 1-2 2 2 2 0 0 1 2 2v5c0 1.1.9 2 2 2h1"
+    />
+    <path d="M16 21h1a2 2 0 0 0 2-2v-5c0-1.1.9-2 2-2a2 2 0 0 1-2-2V5a2 2 0 0 0-2-2h-1" />`),
   mail: strokeIcon(svg` <path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z" />
     <polyline points="22,6 12,13 2,6" />`),
   star: strokeIcon(
@@ -215,6 +222,13 @@ export const icons = {
   listFilter: strokeIcon(svg` <path d="M3 6h18" />
     <path d="M7 12h10" />
     <path d="M10 18h4" />`),
+  // Filled dots: strokeIcon()'s shell sets fill="none", so each dot opts back in.
+  gripVertical: strokeIcon(svg` <circle cx="9" cy="6" r="1.1" fill="currentColor" stroke="none" />
+    <circle cx="9" cy="12" r="1.1" fill="currentColor" stroke="none" />
+    <circle cx="9" cy="18" r="1.1" fill="currentColor" stroke="none" />
+    <circle cx="15" cy="6" r="1.1" fill="currentColor" stroke="none" />
+    <circle cx="15" cy="12" r="1.1" fill="currentColor" stroke="none" />
+    <circle cx="15" cy="18" r="1.1" fill="currentColor" stroke="none" />`),
   arrowDown: strokeIcon(svg`<path d="M12 5v14m7-7-7 7-7-7" />`),
   arrowUp: strokeIcon(svg`<path d="M12 19V5m-7 7 7-7 7 7" />`),
   chevronUp: strokeIcon(svg`<path d="m18 15-6-6-6 6" />`),

@@ -343,10 +343,8 @@ describe("test-projects args", () => {
           "src/agents/openai-transport-stream.failed-sse.test.ts",
           "src/agents/openai-transport-stream.incomplete-output.test.ts",
           "src/agents/openai-transport-stream.incomplete-sse.test.ts",
-          "src/agents/openai-transport-stream.inline-reasoning-and-tool-calls.test.ts",
           "src/agents/openai-transport-stream.reasoning-and-cache.test.ts",
           "src/agents/openai-transport-stream.replay-and-tools.test.ts",
-          "src/agents/openai-transport-stream.replay-sanitization.test.ts",
           "src/agents/openai-transport-stream.usage-and-calls.test.ts",
         ],
         watchMode: false,
@@ -564,6 +562,12 @@ describe("test-projects args", () => {
         forwardedArgs: [],
         includePatterns: [
           "extensions/memory-core/src/memory/index.test.ts",
+          "extensions/memory-core/src/memory/manager-keyword-retrieval.test.ts",
+          "extensions/memory-core/src/memory/manager-provider-lifecycle-fallback.test.ts",
+          "extensions/memory-core/src/memory/manager-provider-lifecycle-leases.test.ts",
+          "extensions/memory-core/src/memory/manager-provider-lifecycle.test.ts",
+          "extensions/memory-core/src/memory/manager-registry.test.ts",
+          "extensions/memory-core/src/memory/manager-search-orchestration.test.ts",
           "extensions/memory-core/src/memory/manager.fts-only-reindex.test.ts",
           "extensions/memory-core/src/memory/manager.legacy-migration-cleanup.test.ts",
           "extensions/memory-core/src/memory/manager.reindex-recovery.test.ts",
@@ -646,6 +650,19 @@ describe("test-projects args", () => {
       {
         config: "test/vitest/vitest.e2e.config.ts",
         forwardedArgs: ["src/commands/models.set.e2e.test.ts"],
+        includePatterns: null,
+        watchMode: false,
+      },
+    ]);
+  });
+
+  it("routes the Docker package contract without private-QA E2E setup", () => {
+    const target = "test/e2e/qa-lab/runtime/package-openclaw-for-docker.e2e.test.ts";
+
+    expect(buildVitestRunPlans([target])).toEqual([
+      {
+        config: "test/vitest/vitest.package-docker.config.ts",
+        forwardedArgs: [target],
         includePatterns: null,
         watchMode: false,
       },

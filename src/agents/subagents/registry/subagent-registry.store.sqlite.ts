@@ -44,6 +44,7 @@ type SubagentRunReadSqliteRow = Pick<
   outcome_status: string | null;
   delivery_status: string | null;
   delivery_suspended_at: number | null;
+  requester_agent_id: string | null;
 };
 type CanonicalSubagentRunRecord = SubagentRunRecord &
   Required<Pick<SubagentRunRecord, "completion" | "delivery">>;
@@ -59,20 +60,18 @@ function hasStateStatus(
   return isRecord(value) && typeof value.status === "string" && statuses.has(value.status);
 }
 
-function hasCanonicalDeliveryState(value: unknown): value is Record<string, unknown> {
-  return (
-    hasStateStatus(value, DELIVERY_STATUSES) &&
-    !("handoffLeaseId" in value || "handoffLeasedAt" in value || "handoffInjectedAt" in value)
-  );
-}
-
 function isCanonicalSubagentRunRecord(value: unknown): value is CanonicalSubagentRunRecord {
   return (
     isRecord(value) &&
     hasStateStatus(value.execution, EXECUTION_STATUSES) &&
     isRecord(value.completion) &&
     typeof value.completion.required === "boolean" &&
-    hasCanonicalDeliveryState(value.delivery)
+    hasStateStatus(value.delivery, DELIVERY_STATUSES) &&
+    !(
+      "handoffLeaseId" in value.delivery ||
+      "handoffLeasedAt" in value.delivery ||
+      "handoffInjectedAt" in value.delivery
+    )
   );
 }
 
@@ -81,10 +80,7 @@ function jsonStringify(value: unknown): string | null {
 }
 
 function parseJson(raw: string | null): unknown {
-  if (!raw) {
-    return undefined;
-  }
-  return safeParseJson(raw);
+  return raw ? safeParseJson(raw) : undefined;
 }
 
 function boolToSqlite(value: boolean | undefined): number | null {
@@ -94,7 +90,6 @@ function boolToSqlite(value: boolean | undefined): number | null {
 /** Rehydrates one sqlite row into the normalized subagent run record shape. */
 function rowToSubagentRunRecord(row: SubagentRunSqliteRow): SubagentRunRecord | null {
   const payload = parseJson(row.payload_json);
-  // SQLite shipped after nested state became canonical; unowned rows are transient.
   if (!isCanonicalSubagentRunRecord(payload)) {
     return null;
   }
@@ -323,6 +318,7 @@ function readSubagentSessionListRows(): SubagentRunReadSqliteRow[] {
         subagentPayloadJsonValue<number | null>("$.generation").as("generation"),
         subagentPayloadJsonValue<string | null>("$.execution.outcome.status").as("outcome_status"),
         subagentPayloadJsonValue<string | null>("$.delivery.status").as("delivery_status"),
+        subagentPayloadJsonValue<string | null>("$.requesterAgentId").as("requester_agent_id"),
         subagentPayloadJsonValue<number | null>("$.delivery.suspendedAt").as(
           "delivery_suspended_at",
         ),
@@ -360,6 +356,7 @@ function rowToSubagentRunReadRecord(row: SubagentRunReadSqliteRow): SubagentRunR
       childSessionKey,
       controllerSessionKey: row.controller_session_key?.trim() || undefined,
       requesterSessionKey,
+      requesterAgentId: row.requester_agent_id?.trim() || undefined,
       model: row.model || undefined,
       generation: normalizeFiniteNumber(row.generation),
       createdAt: row.created_at,

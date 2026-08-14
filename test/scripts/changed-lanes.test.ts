@@ -36,7 +36,6 @@ import {
   shouldRunDoctorContractOwnerTests,
   shouldRunRuntimeSidecarBaselineCheck,
   shouldRunNpmLockGuard,
-  shouldRunPluginSdkApiBaselineCheck,
   shouldRunDeprecationHygieneChecks,
   shouldRunPluginSdkSurfaceChecks,
   shouldRunSqliteSessionSchemaBaselineCheck,
@@ -808,48 +807,6 @@ describe("scripts/changed-lanes", () => {
     }
   });
 
-  it("keeps manifest-declared generated browser assets out of targeted extension lint", () => {
-    const generatedAsset = "extensions/browser/chrome-extension/modules/copilot-runtime.js";
-    const result = detectChangedLanes([
-      generatedAsset,
-      "packages/gateway-client/src/protocol-client.ts",
-    ]);
-    const plan = createChangedCheckPlan(result, { env: { PATH: "/usr/bin" } });
-
-    expect(result.lanes.extensions).toBe(true);
-    expect(plan.commands.map((command) => command.args[0])).toContain("tsgo:extensions");
-    expect(plan.commands.map((command) => command.args[0])).not.toContain("lint:extensions");
-    expect(
-      plan.commands
-        .filter((command) => command.args[0] === "scripts/run-oxlint.mjs")
-        .flatMap((command) => command.args),
-    ).not.toContain(generatedAsset);
-  });
-
-  it("still lints extension source alongside its generated browser asset", () => {
-    const generatedAsset = "extensions/browser/chrome-extension/modules/copilot-runtime.js";
-    const source = "extensions/browser/scripts/copilot-runtime-entry.ts";
-    const result = detectChangedLanes([generatedAsset, source]);
-    const plan = createChangedCheckPlan(result, { env: { PATH: "/usr/bin" } });
-
-    expect(plan.commands).toContainEqual(
-      expect.objectContaining({
-        name: "lint extension changed file",
-        args: [
-          "scripts/run-oxlint.mjs",
-          "--tsconfig",
-          "config/tsconfig/oxlint.extensions.json",
-          source,
-        ],
-      }),
-    );
-    expect(
-      plan.commands
-        .filter((command) => command.args[0] === "scripts/run-oxlint.mjs")
-        .flatMap((command) => command.args),
-    ).not.toContain(generatedAsset);
-  });
-
   it.each([
     {
       owner: "core",
@@ -1223,16 +1180,13 @@ describe("scripts/changed-lanes", () => {
     expect(changedCheckRequiresRemote(mixedResult)).toBe(true);
   });
 
-  it("delegates generated docs baselines with heavy owner checks", () => {
-    for (const changedPath of [
-      "docs/.generated/plugin-sdk-api-baseline.jsonl",
+  it("delegates generated schema baselines with heavy owner checks", () => {
+    const result = detectChangedLanes([
       "docs/.generated/sqlite-session-transcript-schema-baseline.sha256",
-    ]) {
-      const result = detectChangedLanes([changedPath]);
-      expect(result.docsOnly).toBe(true);
-      expect(changedCheckRequiresRemote(result)).toBe(true);
-      expect(shouldDelegateChangedCheckToCrabbox([], {}, { cwd: repoRoot, result })).toBe(true);
-    }
+    ]);
+    expect(result.docsOnly).toBe(true);
+    expect(changedCheckRequiresRemote(result)).toBe(true);
+    expect(shouldDelegateChangedCheckToCrabbox([], {}, { cwd: repoRoot, result })).toBe(true);
   });
 
   it("delegates staged changed gates as explicit remote paths", () => {
@@ -1459,6 +1413,7 @@ describe("scripts/changed-lanes", () => {
       "guarded extension wildcard re-exports",
       "plugin-sdk wildcard re-exports",
       "duplicate scan target coverage",
+      "coercion helper declaration guard",
       "dependency pin guard",
       "format changed files",
       "deprecated API usage",
@@ -1634,13 +1589,15 @@ describe("scripts/changed-lanes", () => {
       docs: true,
       releaseMetadata: true,
     });
-    expect(plan.commands.map((command) => command.args[0])).toEqual([
+    const commands = plan.commands.map((command) => command.args[0]);
+    expect(commands).toEqual([
       "check:no-conflict-markers",
       "check:changelog-attributions",
       "check:doctor-deprecation-registry",
       "lint:extensions:no-guarded-wildcard-reexports",
       "lint:extensions:no-plugin-sdk-wildcard-reexports",
       "dup:check:coverage",
+      "check:coercion-helpers",
       "deps:pins:check",
       "format:check",
       "--import",
@@ -1650,11 +1607,11 @@ describe("scripts/changed-lanes", () => {
       "deps:patches:check",
       "release-metadata:check",
       "android:version:check",
-      "ios:version:check",
       "config:schema:check",
       "config:docs:check",
       "deps:root-ownership:check",
     ]);
+    expect(commands).not.toContain("ios:version:check");
     expect(
       plan.commands.find((command) => command.args[0] === "release-metadata:check")?.args,
     ).toEqual(["release-metadata:check", "--staged"]);
@@ -1818,32 +1775,6 @@ describe("scripts/changed-lanes", () => {
     }
   });
 
-  it("runs Plugin SDK API checks for transitive public contract changes", () => {
-    expect(
-      shouldRunPluginSdkApiBaselineCheck([
-        "src/config/sessions/session-accessor.ts",
-        "packages/gateway-protocol/src/schema/approvals.ts",
-        "extensions/memory-core/index.ts",
-        "scripts/generate-plugin-sdk-api-baseline.ts",
-        "scripts/lib/plugin-sdk-doc-metadata.ts",
-        "scripts/lib/plugin-sdk-entries.mts",
-        "docs/.generated/plugin-sdk-api-baseline.jsonl",
-      ]),
-    ).toBe(true);
-    expect(shouldRunPluginSdkApiBaselineCheck(["docs/help/troubleshooting.md"])).toBe(false);
-
-    const result = detectChangedLanes(["src/config/sessions/session-accessor.ts"]);
-    const plan = createChangedCheckPlan(result);
-
-    expect(plan.commands).toContainEqual({
-      name: "Plugin SDK API contract manifest",
-      args: ["plugin-sdk:api:check"],
-    });
-    expect(plan.commands.map((command) => command.args[0])).not.toContain(
-      "plugin-sdk:surface:check",
-    );
-  });
-
   it("runs Plugin SDK export and surface checks for direct SDK changes", () => {
     expect(
       shouldRunPluginSdkSurfaceChecks([
@@ -1862,10 +1793,6 @@ describe("scripts/changed-lanes", () => {
     const result = detectChangedLanes(["src/plugin-sdk/core.ts"]);
     const plan = createChangedCheckPlan(result);
 
-    expect(plan.commands).toContainEqual({
-      name: "Plugin SDK API contract manifest",
-      args: ["plugin-sdk:api:check"],
-    });
     expect(plan.commands).toContainEqual({
       name: "Plugin SDK package exports",
       args: ["plugin-sdk:check-exports"],
@@ -1920,12 +1847,17 @@ describe("scripts/changed-lanes", () => {
         "src/channels/turn/run-channel-turn.ts",
         "scripts/check-wrapper-shadowing.mts",
         "scripts/check-export-name-collisions.mts",
-        "scripts/lib/wrapper-shadowing-baseline.json",
         "scripts/lib/ts-guard-utils.mts",
         "package.json",
       ]),
     ).toBe(true);
-    expect(shouldRunWrapperShadowingCheck(["docs/concepts/message-lifecycle.md"])).toBe(false);
+    expect(
+      shouldRunWrapperShadowingCheck([
+        "docs/concepts/message-lifecycle.md",
+        "scripts/lib/wrapper-shadowing-baseline.json",
+        "scripts/lib/export-name-collision-baseline.json",
+      ]),
+    ).toBe(false);
 
     const plan = createChangedCheckPlan(
       detectChangedLanes(["scripts/check-wrapper-shadowing.mts"]),
@@ -2393,6 +2325,7 @@ describe("scripts/changed-lanes", () => {
         args: ["lint:extensions:no-plugin-sdk-wildcard-reexports"],
       },
       { name: "duplicate scan target coverage", args: ["dup:check:coverage"] },
+      { name: "coercion helper declaration guard", args: ["check:coercion-helpers"] },
       { name: "dependency pin guard", args: ["deps:pins:check"] },
       { name: "package patch guard", args: ["deps:patches:check"] },
     ]);
@@ -2416,6 +2349,7 @@ describe("scripts/changed-lanes", () => {
         args: ["lint:extensions:no-plugin-sdk-wildcard-reexports"],
       },
       { name: "duplicate scan target coverage", args: ["dup:check:coverage"] },
+      { name: "coercion helper declaration guard", args: ["check:coercion-helpers"] },
       { name: "dependency pin guard", args: ["deps:pins:check"] },
       {
         name: "format changed files",
