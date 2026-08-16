@@ -152,7 +152,7 @@ vi.mock("../channels/plugins/status.js", () => ({
     accountId,
     ...plugin.config.inspectAccount(cfg),
   }),
-  buildChannelAccountSnapshot: async ({
+  resolveChannelAccountSnapshot: async ({
     plugin,
     cfg,
     accountId,
@@ -243,6 +243,20 @@ describe("channelsStatusCommand SecretRef fallback flow", () => {
       params: { channel: "imsg", probe: true, timeoutMs: 30000 },
       timeoutMs: 30000,
     });
+  });
+
+  it("preserves gateway account text in JSON output", async () => {
+    const name = "Primary\u001B]0;channels-status-json\u0007🦞\r\nAccount";
+    const payload = {
+      channelAccounts: { discord: [{ accountId: "default", name }] },
+      channels: { discord: { name } },
+    };
+    mocks.callGateway.mockResolvedValue(payload);
+    const { runtime, logs } = createCapturingTestRuntime();
+
+    await channelsStatusCommand({ json: true, probe: false }, runtime as never);
+
+    expect(JSON.parse(logs.at(-1) ?? "{}")).toStrictEqual(payload);
   });
 
   it("rejects malformed timeouts before gateway status requests", async () => {

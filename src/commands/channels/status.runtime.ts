@@ -76,6 +76,20 @@ export function formatGatewayChannelsStatusLines(payload: Record<string, unknown
   if (eventLoopLine) {
     lines.push(theme.warn(`Gateway event loop degraded ${eventLoopLine}`));
   }
+  const statusWarnings = Array.isArray(payload.warnings)
+    ? payload.warnings
+        .filter(
+          (warning): warning is string => typeof warning === "string" && warning.trim().length > 0,
+        )
+        .slice(0, 50)
+    : [];
+  if (payload.partial === true || statusWarnings.length > 0) {
+    lines.push(theme.warn("Channel status is partial:"));
+    for (const warning of statusWarnings) {
+      lines.push(`- ${warning.slice(0, 500)}`);
+    }
+    lines.push("");
+  }
   const channelLabels =
     payload.channelLabels && typeof payload.channelLabels === "object"
       ? (payload.channelLabels as Record<string, unknown>)
@@ -217,7 +231,7 @@ export async function renderChannelsStatusFallback(params: {
   runtime.error(
     `${gatewayAuthUnavailable ? "Gateway auth unavailable" : "Gateway not reachable"}: ${safeError}`,
   );
-  const cfg = await requireValidConfig(runtime);
+  const cfg = await requireValidConfig(runtime, { observe: false });
   if (!cfg) {
     return;
   }
@@ -228,7 +242,7 @@ export async function renderChannelsStatusFallback(params: {
     mode: "read_only_status",
     runtime,
   });
-  const snapshot = await readConfigFileSnapshot();
+  const snapshot = await readConfigFileSnapshot({ observe: false });
   const mode = cfg.gateway?.mode === "remote" ? "remote" : "local";
   const requestedChannel = opts.channel
     ? (normalizeChannelId(opts.channel) ?? normalizeOptionalLowercaseString(opts.channel))

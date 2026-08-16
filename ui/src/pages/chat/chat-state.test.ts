@@ -107,6 +107,107 @@ describe("canonical session message recovery", () => {
     });
   });
 
+  it("keeps a previous run final before a newer active user turn", () => {
+    const previousUser = {
+      role: "user",
+      content: [{ type: "text", text: "What are groups?" }],
+      __openclaw: { id: "previous-user", idempotencyKey: "previous-run:user", seq: 1 },
+    };
+    const currentUser = {
+      role: "user",
+      content: [{ type: "text", text: "Why were my sessions missing?" }],
+      __openclaw: { id: "current-user", idempotencyKey: "current-run:user", seq: 3 },
+    };
+    const persistedFinal = {
+      role: "assistant",
+      content: [{ type: "text", text: "Groups organize conversations." }],
+      __openclaw: { id: "previous-final", seq: 2 },
+    };
+    const { state } = createSessionEventState({
+      chatMessages: [previousUser, currentUser],
+      chatRunId: "current-run",
+      chatStream: "Checking external sessions...",
+    });
+
+    handlePageGatewayEvent(state, {
+      type: "event",
+      event: "session.message",
+      payload: {
+        sessionKey: state.sessionKey,
+        clientRunId: "previous-run",
+        hasActiveRun: true,
+        messageId: "previous-final",
+        messageSeq: 2,
+        message: persistedFinal,
+      },
+    });
+
+    expect(state.chatMessages.map((message) => (message as { role?: string }).role)).toEqual([
+      "user",
+      "assistant",
+      "user",
+    ]);
+    expect(state.chatMessages[1]).toMatchObject({
+      content: persistedFinal.content,
+      __openclaw: { id: "previous-final", seq: 2 },
+    });
+
+    handlePageGatewayEvent(state, {
+      type: "event",
+      event: "chat",
+      payload: {
+        sessionKey: state.sessionKey,
+        runId: "previous-run",
+        state: "final",
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "Groups organize conversations." }],
+        },
+      },
+    });
+
+    expect(state.chatMessages.map((message) => (message as { role?: string }).role)).toEqual([
+      "user",
+      "assistant",
+      "user",
+    ]);
+    expect(state.chatRunId).toBe("current-run");
+    expect(state.chatStream).toBe("Checking external sessions...");
+  });
+
+  it("leaves the active run assistant message on the terminal stream path", () => {
+    const currentUser = {
+      role: "user",
+      content: [{ type: "text", text: "Current prompt" }],
+      __openclaw: { id: "current-user", idempotencyKey: "current-run:user", seq: 1 },
+    };
+    const { state } = createSessionEventState({
+      chatMessages: [currentUser],
+      chatRunId: "current-run",
+      chatStream: "Current partial reply",
+    });
+
+    handlePageGatewayEvent(state, {
+      type: "event",
+      event: "session.message",
+      payload: {
+        sessionKey: state.sessionKey,
+        clientRunId: "current-run",
+        hasActiveRun: true,
+        messageId: "current-final",
+        messageSeq: 2,
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "Current final reply" }],
+          __openclaw: { id: "current-final", seq: 2 },
+        },
+      },
+    });
+
+    expect(state.chatMessages).toEqual([currentUser]);
+    expect(state.chatStream).toBe("Current partial reply");
+  });
+
   it("renders distinct live peers immediately and coalesces their stale history", async () => {
     let resolveHistory!: (result: {
       messages: unknown[];
@@ -164,6 +265,7 @@ describe("canonical session message recovery", () => {
   });
 
   it("drops pre-reset live and pending messages before accepting a new session turn", () => {
+    const retireSessionCompanion = vi.fn();
     const pendingUser = {
       role: "user",
       content: [{ type: "text", text: "Pending before reset" }],
@@ -173,6 +275,9 @@ describe("canonical session message recovery", () => {
       connected: false,
       chatMessages: [pendingUser],
     });
+    (
+      state as ChatPageHost & { retireSessionCompanion: typeof retireSessionCompanion }
+    ).retireSessionCompanion = retireSessionCompanion;
     const deliverUser = (id: string, text: string) =>
       handlePageGatewayEvent(state, {
         type: "event",
@@ -200,6 +305,7 @@ describe("canonical session message recovery", () => {
       },
     });
     expect(state.chatMessages).toEqual([]);
+    expect(retireSessionCompanion).toHaveBeenCalledExactlyOnceWith(state.sessionKey, "main");
 
     deliverUser("post-reset-live", "Live after reset");
     expect(state.chatMessages).toHaveLength(1);
@@ -209,6 +315,7 @@ describe("canonical session message recovery", () => {
   });
 
   it("does not clear the selected transcript when another agent resets", () => {
+    const retireSessionCompanion = vi.fn();
     const selectedUser = {
       role: "user",
       content: [{ type: "text", text: "Keep this agent's conversation" }],
@@ -218,6 +325,9 @@ describe("canonical session message recovery", () => {
       connected: false,
       chatMessages: [selectedUser],
     });
+    (
+      state as ChatPageHost & { retireSessionCompanion: typeof retireSessionCompanion }
+    ).retireSessionCompanion = retireSessionCompanion;
 
     handlePageGatewayEvent(state, {
       type: "event",
@@ -230,6 +340,45 @@ describe("canonical session message recovery", () => {
     });
 
     expect(state.chatMessages).toEqual([selectedUser]);
+    expect(retireSessionCompanion).toHaveBeenCalledExactlyOnceWith("agent:other:main", "other");
+  });
+
+  it("keeps the routed row when a hidden pane observes its archive first", () => {
+    const archivedKey = "agent:main:dashboard:archived";
+    const sharedHost = makeChatHost({
+      sessionKey: archivedKey,
+      sessionsResult: {
+        ts: 1,
+        path: "",
+        count: 1,
+        defaults: { modelProvider: null, model: null, contextTokens: null },
+        sessions: [
+          {
+            key: archivedKey,
+            kind: "direct",
+            archived: false,
+            derivedTitle: "Archived title",
+            updatedAt: 1,
+          },
+        ],
+      },
+    });
+    expect(sharedHost.sessions.state.result?.sessions).toHaveLength(1);
+    const { state } = createSessionEventState({ sessions: sharedHost.sessions });
+
+    handlePageGatewayEvent(state, {
+      type: "event",
+      event: "sessions.changed",
+      payload: { key: archivedKey, sessionKey: archivedKey, archived: true, reason: "update" },
+    });
+
+    expect(state.sessions.state.result?.sessions).toEqual([
+      expect.objectContaining({
+        key: archivedKey,
+        archived: true,
+        derivedTitle: "Archived title",
+      }),
+    ]);
   });
 
   it("does not mistake identity-only message invalidation for a session reset", () => {
@@ -748,6 +897,39 @@ describe("ChatStateController render lifecycle", () => {
       lifecycleEvent("approval-resolved", state.sessionKey, "approval-2"),
     );
     expect(state.waitingApprovalStatuses.size).toBe(0);
+  });
+
+  it("skips no-op assistant invalidation while tool and plan changes render immediately", () => {
+    const requestUpdate = vi.fn();
+    const state = createStreamEventState({
+      requestUpdate,
+      chatStreamSegments: [],
+      chatToolMessages: [],
+      toolStreamById: new Map(),
+      toolStreamOrder: [],
+      toolStreamSyncTimer: null,
+      planStatus: null,
+      sessions: { setModelOverride: vi.fn() } as never,
+    });
+    const emitAgent = (seq: number, stream: string, data: Record<string, unknown>) =>
+      handlePageGatewayEvent(state, {
+        type: "event",
+        event: "agent",
+        payload: { runId: "run-1", seq, stream, ts: seq, sessionKey: "main", data },
+      });
+
+    emitAgent(1, "assistant", { text: "Hello", delta: "Hello" });
+    expect(requestUpdate).not.toHaveBeenCalled();
+
+    emitAgent(2, "plan", {
+      phase: "update",
+      steps: [{ step: "Measure the repair", status: "in_progress" }],
+    });
+    expect(requestUpdate).toHaveBeenCalledOnce();
+
+    requestUpdate.mockClear();
+    emitAgent(3, "tool", { phase: "start", name: "read", toolCallId: "tool-1" });
+    expect(requestUpdate).toHaveBeenCalledOnce();
   });
 
   it("coalesces stream invalidations into one animation frame", () => {
@@ -1538,7 +1720,7 @@ describe("refreshChatMetadata", () => {
   it("loads compatibility models when the gateway does not advertise chat metadata", async () => {
     const request = vi.fn(async (method: string, params?: unknown) => {
       if (method === "models.list") {
-        expect(params).toEqual({ view: "configured" });
+        expect(params).toEqual({ view: "configured", agentId: "main", preparedOnly: true });
         return {
           models: [{ id: "compat-model", name: "Compat Model", provider: "openai" }],
         };
@@ -1587,8 +1769,14 @@ describe("refreshChatMetadata", () => {
     expect(request).toHaveBeenCalledTimes(1);
   });
 
-  it("does not load unscoped compatibility models for a non-default agent", async () => {
-    const request = vi.fn(async (method: string) => {
+  it("loads agent-scoped compatibility models for a non-default agent", async () => {
+    const request = vi.fn(async (method: string, params?: unknown) => {
+      if (method === "models.list") {
+        expect(params).toEqual({ view: "configured", agentId: "work", preparedOnly: true });
+        return {
+          models: [{ id: "work-model", name: "Work Model", provider: "openai" }],
+        };
+      }
       expect(method).toBe("commands.list");
       return { commands: [] };
     });
@@ -1600,9 +1788,11 @@ describe("refreshChatMetadata", () => {
 
     await refreshChatMetadata(state);
 
-    expect(state.chatModelCatalog).toEqual([]);
+    expect(state.chatModelCatalog).toEqual([
+      { id: "work-model", name: "Work Model", provider: "openai" },
+    ]);
     expect(state.chatModelsLoading).toBe(false);
-    expect(request).toHaveBeenCalledTimes(1);
+    expect(request).toHaveBeenCalledTimes(2);
   });
 
   it("does not apply compatibility commands after switching agents", async () => {
@@ -1675,6 +1865,23 @@ describe("refreshChatMetadata", () => {
 });
 
 describe("refreshChatModelAuthStatus", () => {
+  it("scopes auth status to the selected session agent", async () => {
+    const request = vi.fn(async () => ({ ts: 1, providers: [] }));
+    const state = {
+      client: { request },
+      connected: true,
+      connectionEpoch: 1,
+      sessionKey: "agent:work:dashboard:current",
+      assistantAgentId: "main",
+      modelAuthStatusResult: null,
+      modelAuthStatusError: null,
+    } as unknown as ChatPageHost;
+
+    await refreshChatModelAuthStatus(state);
+
+    expect(request).toHaveBeenCalledWith("models.authStatus", { agentId: "work" });
+  });
+
   it.each(["success", "failure"] as const)(
     "ignores a stale auth status %s after reconnecting the same client",
     async (outcome) => {

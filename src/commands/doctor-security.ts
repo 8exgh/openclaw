@@ -11,7 +11,7 @@ import { resolveGatewayAuth } from "../gateway/auth.js";
 import { isLoopbackHost, resolveGatewayBindHost } from "../gateway/net.js";
 import { resolveExecPolicyScopeSnapshot } from "../infra/exec-approvals-effective.js";
 import {
-  loadExecApprovals,
+  loadExecApprovalsReadOnly,
   resolveExecApprovalsDisplayPath,
   type ExecAsk,
   type ExecMode,
@@ -20,7 +20,7 @@ import {
 import { isLikelySensitiveModelProviderHeaderName } from "../secrets/model-provider-header-policy.js";
 import { hasConfiguredPlaintextSecretValue } from "../secrets/secret-value.js";
 import { discoverConfigSecretTargets } from "../secrets/target-registry.js";
-import { collectChannelSecurityFindings } from "../security/audit-channel.js";
+import { collectChannelSecurityFindingsCore } from "../security/audit-channel.js";
 import { collectExecFilesystemPolicyDriftHits } from "../security/exec-filesystem-policy.js";
 
 function collectImplicitHeartbeatDirectPolicyWarnings(cfg: OpenClawConfig): string[] {
@@ -88,7 +88,7 @@ function execAskRank(value: ExecAsk): number {
 
 function collectExecPolicyConflictWarnings(cfg: OpenClawConfig): string[] {
   const warnings: string[] = [];
-  const approvals = loadExecApprovals();
+  const approvals = loadExecApprovalsReadOnly();
   const defaultRequestedSecuritySource = "OpenClaw default (full)";
   const defaultRequestedAskSource = "OpenClaw default (off)";
 
@@ -340,7 +340,7 @@ export async function collectSecurityWarnings(
     warnings.push(...tokenConflict.warningLines);
   }
 
-  const channelFindings = await collectChannelSecurityFindings({
+  const channelFindings = await collectChannelSecurityFindingsCore({
     cfg,
     mode: "doctor",
     plugins: listReadOnlyChannelPluginsForConfig(cfg, {

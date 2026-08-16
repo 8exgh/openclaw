@@ -1,3 +1,4 @@
+import { parseDateStringTimestampMs } from "@openclaw/normalization-core/number-coercion";
 import type {
   SessionCatalogTranscriptItem,
   SessionsCatalogReadResult,
@@ -21,6 +22,7 @@ import {
 } from "../../lib/sessions/catalog-key.ts";
 import { resolveSessionKey, scopedAgentParamsForSession } from "../../lib/sessions/index.ts";
 import { parseAgentSessionKey } from "../../lib/sessions/session-key.ts";
+import { releaseChatAttachmentPayloads } from "./attachment-payload-store.ts";
 import { catalogMessageId } from "./catalog-message-id.ts";
 import { loadChatBranches } from "./chat-history.ts";
 import {
@@ -188,14 +190,23 @@ export abstract class ChatPaneSession extends ChatPaneTaskSuggestions {
       return;
     }
     const guardKey = state.sessionKey;
-    void this.context.sessions.patch(row.key, { unread: false }, { agentId }).catch(() => {
-      // Unlatch so later unread snapshots retry; the session capability
-      // publishes the actionable error for the owning page.
-      this.unreadPatchGuard.patchFailed(guardKey);
-    });
+    void this.context.sessions.patch(row.key, { unread: false }, { agentId }).then(
+      (result) => {
+        // A null result means no request was sent (connection scope lost);
+        // unlatch like a failure or the badge stays lit until navigation.
+        if (result === null) {
+          this.unreadPatchGuard.patchFailed(guardKey);
+        }
+      },
+      () => {
+        // Unlatch so later unread snapshots retry; the session capability
+        // publishes the actionable error for the owning page.
+        this.unreadPatchGuard.patchFailed(guardKey);
+      },
+    );
   }
 
-  protected async restoreArchivedSession(sessionKey: string) {
+  protected async restoreArchivedSession(sessionKey: string, expectedSessionId: string) {
     const scope = this.captureConnectionScope();
     if (!scope || scope.state.sessionKey !== sessionKey) {
       return;
@@ -214,7 +225,11 @@ export abstract class ChatPaneSession extends ChatPaneTaskSuggestions {
     let failure: string | null = null;
     try {
       // The patch can resolve falsy on failure; the capability error explains it.
-      const patched = await scope.sessions.patch(sessionKey, { archived: false }, { agentId });
+      const patched = await scope.sessions.patch(
+        sessionKey,
+        { archived: false },
+        { agentId, expectedSessionId },
+      );
       if (!patched) {
         failure = scope.sessions.state.error;
       }
@@ -272,6 +287,9 @@ export abstract class ChatPaneSession extends ChatPaneTaskSuggestions {
     this.catalogCursor = undefined;
     this.catalogSession = null;
     this.catalogHost = null;
+    // Payload-store entries and their object URLs are reclaimed only by
+    // explicit release; clearing the array alone strands them for the tab.
+    releaseChatAttachmentPayloads(state.chatAttachments);
     state.chatAttachments = [];
     state.chatLoading = true;
     state.requestUpdate();
@@ -279,8 +297,7 @@ export abstract class ChatPaneSession extends ChatPaneTaskSuggestions {
   }
 
   protected catalogItemMessage(item: SessionCatalogTranscriptItem): Record<string, unknown> | null {
-    const parsedTimestamp = item.timestamp ? Date.parse(item.timestamp) : Number.NaN;
-    const timestamp = Number.isFinite(parsedTimestamp) ? parsedTimestamp : null;
+    const timestamp = parseDateStringTimestampMs(item.timestamp) ?? null;
     const text = item.text?.trim() ? item.text : null;
     if (item.type === "userMessage") {
       return text
@@ -367,10 +384,13 @@ export abstract class ChatPaneSession extends ChatPaneTaskSuggestions {
     if (older && !this.catalogCursor) {
       return false;
     }
+    const agentId = resolveChatAgentId(state);
     const generation = older ? this.catalogLoadGeneration : ++this.catalogLoadGeneration;
     const requestedSessionKey = buildCatalogSessionKey(key);
     const isCurrent = () =>
-      generation === this.catalogLoadGeneration && this.sessionKey === requestedSessionKey;
+      generation === this.catalogLoadGeneration &&
+      this.sessionKey === requestedSessionKey &&
+      resolveChatAgentId(state) === agentId;
     if (!older) {
       this.catalogLoading = true;
       this.catalogCursor = undefined;
@@ -383,7 +403,7 @@ export abstract class ChatPaneSession extends ChatPaneTaskSuggestions {
     }
     try {
       if (!older) {
-        const lookup = await lookupCatalogSession({ client, key, isCurrent });
+        const lookup = await lookupCatalogSession({ agentId, client, key, isCurrent });
         if (!lookup) {
           return false;
         }
@@ -395,9 +415,13 @@ export abstract class ChatPaneSession extends ChatPaneTaskSuggestions {
         this.olderCursorsSeen.add(requestedOlderCursor);
       }
       const page = await client.request<SessionsCatalogReadResult>("sessions.catalog.read", {
+        agentId,
         catalogId: key.catalogId,
         hostId: key.hostId,
         threadId: key.threadId,
+        ...(this.catalogSession?.sourceHomeId
+          ? { sourceHomeId: this.catalogSession.sourceHomeId }
+          : {}),
         limit: 50,
         ...(older && this.catalogCursor ? { cursor: this.catalogCursor } : {}),
       });

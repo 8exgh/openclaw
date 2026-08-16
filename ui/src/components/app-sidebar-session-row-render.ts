@@ -18,6 +18,7 @@ import type {
   CatalogBackingSessionDisplay,
   CatalogSessionMenuRequest,
 } from "./app-sidebar-session-catalogs.ts";
+import { formatSidebarTimestamp } from "./app-sidebar-session-catalogs.ts";
 import {
   rowDemandsVisibility,
   sidebarSessionMetaId,
@@ -39,6 +40,7 @@ import {
   resolveSidebarSessionSubtitle,
 } from "./session-row-subtitle.ts";
 import type { SidebarMenusController } from "./sidebar-menus-controller.ts";
+import { projectPresencePayload } from "./viewer-facepile.ts";
 import "./elapsed-time.ts";
 
 const SIDEBAR_VISIBLE_CHILD_SESSION_LIMIT = 4;
@@ -106,11 +108,7 @@ export interface SessionListHost {
   handleSessionRowClick(event: MouseEvent, session: SidebarRecentSession): void;
   toggleSessionChildren(session: SidebarRecentSession): void;
   toggleSessionPin(session: SidebarRecentSession): void;
-  toggleSessionMenu(
-    session: SidebarRecentSession,
-    menuSession: SidebarRecentSession,
-    trigger: HTMLElement,
-  ): void;
+  toggleSessionMenu(session: SidebarRecentSession, trigger: HTMLElement): void;
   showMoreChildren(sessionKey: string): void;
   sectionDragOver(event: DragEvent, sectionId: string, group?: string): void;
   sectionDragLeave(event: DragEvent, sectionId: string, group?: string): void;
@@ -118,7 +116,7 @@ export interface SessionListHost {
   startSidebarSectionDrag(sectionId: string): void;
   finishSidebarSectionDrag(): void;
   toggleSection(sectionId: string): void;
-  openNewSession(): void;
+  openNewSession(target?: NewSessionTarget): void;
   readNewSessionAccess(): import("../lib/session-method-access.ts").SessionMethodAccess;
   readSessionMutationAccess(request: {
     method: string;
@@ -183,28 +181,37 @@ export function renderRecentSession(params: {
       ? session.archivedBy
       : session.createdActor
     : undefined;
-  const { running, leadingIndicator, trailingIndicator } = renderSessionLeadingState(
-    session,
-    pullRequestState,
-    ownerActor,
-    ownerAttribution,
-  );
+  const ownerId = ownerActor?.id?.trim();
+  const ownerViewing = ownerId
+    ? projectPresencePayload(
+        host.sessionData.presencePayload,
+        host.sessionDataContext?.gateway.snapshot.selfUser?.id,
+        host.sessionData.presenceInstanceId,
+      ).users.some((user) => user.id === ownerId && user.watchedSessions.includes(session.key))
+    : undefined;
+  const { running, leadingIndicator, trailingIndicator, renderedOwnerId } =
+    renderSessionLeadingState(
+      session,
+      pullRequestState,
+      ownerActor,
+      ownerAttribution,
+      ownerViewing,
+    );
   const trailingDescription = session.isChild
     ? ""
     : describeSessionTrailingState(session, pullRequestState);
-  const meta = display?.meta ?? session.meta;
+  const meta = display?.meta ?? formatSidebarTimestamp(session.updatedAt);
   const rowMeta = session.pinned ? "" : meta;
   const hasTrail = session.isChild && (session.runtimeMs != null || session.startedAt != null);
   const metaId = hasTrail ? sidebarSessionMetaId(session.key) : undefined;
   const stateId = trailingIndicator === nothing ? undefined : sidebarSessionStateId(session.key);
-  const menuSession = display ? { ...session, meta } : session;
   const openMenuFromEvent = session.isChild
     ? undefined
     : (event: MouseEvent | KeyboardEvent) =>
         handleContextMenuEvent(
           event,
           (event.currentTarget as HTMLElement).querySelector("[data-session-menu]"),
-          (trigger, x, y) => host.sidebarMenus.openSessionMenu(menuSession, x, y, trigger),
+          (trigger, x, y) => host.sidebarMenus.openSessionMenu(session, x, y, trigger),
         );
   const title = [
     display?.title ?? [label, narration, rowMeta].filter(Boolean).join(" · "),
@@ -246,6 +253,7 @@ export function renderRecentSession(params: {
     requiredScope: "operator.write",
   });
   const rowDraggable = !session.isChild && groupWriteAccess.allowed;
+  // Always reserve the lead so every title shares the section-label text line.
   const row = html`
     <div
       class=${rowClass}
@@ -315,6 +323,7 @@ export function renderRecentSession(params: {
           .selfUserId=${host.sessionDataContext?.gateway.snapshot.selfUser?.id}
           .selfInstanceId=${host.sessionData.presenceInstanceId}
           .sessionKey=${session.key}
+          .excludeUserId=${renderedOwnerId}
           .maxVisible=${3}
           variant="session"
         ></openclaw-viewer-facepile>
@@ -373,7 +382,7 @@ export function renderRecentSession(params: {
                   ? html`<openclaw-elapsed-time
                       .startMs=${session.runtimeSampledAt! - session.runtimeMs}
                     ></openclaw-elapsed-time>`
-                  : (formatDurationCompact(session.runtimeMs, { spaced: true }) ?? "0ms")
+                  : (formatDurationCompact(session.runtimeMs) ?? "0ms")
                 : html`<openclaw-elapsed-time
                     .startMs=${session.startedAt!}
                     .endMs=${session.endedAt ?? null}
@@ -405,7 +414,7 @@ export function renderRecentSession(params: {
                 @click=${(event: MouseEvent) => {
                   event.stopPropagation();
                   const trigger = event.currentTarget as HTMLElement;
-                  host.toggleSessionMenu(session, menuSession, trigger);
+                  host.toggleSessionMenu(session, trigger);
                 }}
               >
                 ${icons.moreHorizontal}

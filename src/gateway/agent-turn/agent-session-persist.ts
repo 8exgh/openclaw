@@ -18,7 +18,10 @@ import {
 } from "../../config/sessions/session-accessor.js";
 import { buildSessionCreationStamp } from "../../config/sessions/session-entry-provenance.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
-import { normalizeCronScheduledToolPolicy } from "../../cron/scheduled-tool-policy.js";
+import {
+  normalizeCronScheduledToolCallerOrigin,
+  normalizeCronScheduledToolPolicy,
+} from "../../cron/scheduled-tool-policy.js";
 import { assertAgentRunLifecycleGenerationCurrent } from "../../infra/agent-events.js";
 import { resolveSendPolicy } from "../../sessions/send-policy.js";
 import { recordSessionCreated } from "../../sessions/session-state-events.js";
@@ -43,6 +46,7 @@ import {
 export type CronContinuationClaim = {
   storePath: string;
   sessionKey: string;
+  sessionAgentId: string;
   lifecycleRevision: string;
   initialEntry: SessionEntry;
   mediaTaskIdsBefore: ReadonlySet<string>;
@@ -238,6 +242,13 @@ export async function persistAgentSessionPhase(params: {
                       ),
                     }
                   : {}),
+                ...(normalizeCronScheduledToolPolicy(marker.scheduledToolPolicy)?.mode === "account"
+                  ? {
+                      scheduledToolCallerOrigin: normalizeCronScheduledToolCallerOrigin(
+                        marker.scheduledToolCallerOrigin,
+                      ),
+                    }
+                  : {}),
                 ...(marker.cliSessionBindingFacts
                   ? { cliSessionBindingFacts: { ...marker.cliSessionBindingFacts } }
                   : {}),
@@ -254,6 +265,7 @@ export async function persistAgentSessionPhase(params: {
               params.setCronContinuationClaim({
                 storePath: params.storePath,
                 sessionKey: params.canonicalSessionKey,
+                sessionAgentId: params.sessionAgentId,
                 lifecycleRevision: marker.lifecycleRevision,
                 initialEntry: structuredClone(entryForPatch!),
                 mediaTaskIdsBefore: getGeneratedMediaTaskIdsForSessionKey(
@@ -520,7 +532,7 @@ export async function persistAgentSessionPhase(params: {
     pendingChatRun: isMainSession
       ? {
           sessionKey: params.canonicalSessionKey,
-          ...(params.canonicalSessionKey === "global" ? { agentId: params.sessionAgentId } : {}),
+          agentId: params.sessionAgentId,
         }
       : undefined,
     bestEffortDeliver:

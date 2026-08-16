@@ -25,6 +25,7 @@ export type TestSessionsPage = HTMLElement & {
   sessionMenu: { key: string; x: number; y: number } | null;
   sessionMenuTrigger: HTMLElement | null;
   checkpointItemsByKey: Record<string, SessionCompactionCheckpoint[]>;
+  checkpointErrorByKey: Record<string, string>;
   checkpointLoadingKey: string | null;
   checkpointBusyKey: string | null;
   sessionMutationPending: boolean;
@@ -45,9 +46,14 @@ export type TestSessionsPage = HTMLElement & {
     position: { x: number; y: number },
     trigger: HTMLElement | null,
   ) => void;
-  patchSession: (key: string, patch: { archived?: boolean; pinned?: boolean }) => Promise<unknown>;
+  patchSession: (
+    key: string,
+    patch: { archived?: boolean; pinned?: boolean; label?: string | null },
+    scope?: unknown,
+    expectedSessionId?: string,
+  ) => Promise<unknown>;
   archiveSessionWithUndo: (row: GatewaySessionRow) => Promise<void>;
-  forkSession: (key: string) => Promise<void>;
+  forkSession: (key: string, fromLastCompleted?: boolean) => Promise<void>;
   branchCheckpoint: (sessionKey: string, checkpointId: string) => Promise<void>;
   restoreCheckpoint: (sessionKey: string, checkpointId: string) => Promise<void>;
   addToWorkboard: (session: GatewaySessionRow) => Promise<void>;

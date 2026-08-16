@@ -54,10 +54,12 @@ async function pinWidget(event: Event, pin: () => Promise<void>): Promise<void> 
     const pinnedLabel = t("chat.toolCards.pinnedToDashboard");
     button.title = button.ariaLabel = pinnedLabel;
     button.dataset.pinned = "true";
-  } catch (error) {
+  } catch {
     button.disabled = false;
     button.ariaLabel = t("chat.toolCards.pinToDashboard");
-    button.title = error instanceof Error ? error.message : String(error);
+    const failureLabel = t("chat.toolCards.pinToDashboardFailed");
+    button.title = failureLabel;
+    showToast({ message: failureLabel });
   }
 }
 
@@ -135,7 +137,7 @@ const WIDGET_SIZE_MESSAGE_TYPE = "openclaw:widget-size";
 const WIDGET_PROMPT_OFFER_MESSAGE_TYPE = "openclaw:widget-prompt-offer";
 const WIDGET_PROMPT_MESSAGE_TYPE = "openclaw:widget-prompt";
 const WIDGET_PROMPT_HOST_READY_MESSAGE_TYPE = "openclaw:widget-prompt-host-ready";
-const WIDGET_FRAME_MIN_HEIGHT = 160;
+const WIDGET_FRAME_MIN_HEIGHT = 48;
 const WIDGET_FRAME_MAX_HEIGHT = 1200;
 // Preview frames render inside lit shadow roots, so a document query cannot
 // find them; frames register themselves on load and are dropped once detached.
@@ -198,7 +200,7 @@ const adoptedWidgetPromptFrames = new WeakSet<HTMLIFrameElement>();
 const widgetPromptOfferListenerWindows = new WeakSet<Window>();
 
 function tryAdoptWidgetPromptPort(frame: HTMLIFrameElement) {
-  const source = frame.contentWindow as unknown as object | null;
+  const source = frame.contentWindow;
   if (adoptedWidgetPromptFrames.has(frame) || !promptEligibleFrames.has(frame) || !source) {
     return;
   }
@@ -234,14 +236,14 @@ function installWidgetPromptOfferListener() {
     if (!source || !port || event.origin !== "null") {
       return;
     }
-    if (offeredWidgetPromptSources.has(source as unknown as object)) {
+    if (offeredWidgetPromptSources.has(source)) {
       // Only the first offer per content window can win; a replacement
       // document's offer must never displace the genuine bridge's.
       port.close();
       return;
     }
-    offeredWidgetPromptSources.add(source as unknown as object);
-    pendingWidgetPromptPorts.set(source as unknown as object, port);
+    offeredWidgetPromptSources.add(source);
+    pendingWidgetPromptPorts.set(source, port);
     // Posted-message and iframe-load tasks have no guaranteed cross-source
     // ordering, so the offer may arrive after the eligible frame's load;
     // adopt for it now instead of stranding the widget without a channel.
