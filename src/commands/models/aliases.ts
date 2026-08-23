@@ -6,7 +6,7 @@ import { normalizeAgentModelMapForConfig } from "../../config/model-input.js";
 import { type RuntimeEnv, writeRuntimeJson, writeRuntimeStdout } from "../../runtime.js";
 import { normalizeAlias } from "./alias-name.js";
 import { loadModelsConfig } from "./load-config.js";
-import { ensureFlagCompatibility, resolveModelTarget, updateConfig } from "./shared.js";
+import { ensureFlagCompatibility, resolveModelTargetForWrite, updateConfig } from "./shared.js";
 
 /** Lists configured model aliases as JSON, plain pairs, or human-readable rows. */
 export async function modelsAliasesListCommand(
@@ -55,11 +55,18 @@ export async function modelsAliasesAddCommand(
 ) {
   const alias = normalizeAlias(aliasRaw);
   const normalizedAlias = alias.toLowerCase();
-  const cfg = await loadModelsConfig({ commandName: "models aliases add", runtime });
-  const resolved = resolveModelTarget({ raw: modelRaw, cfg });
-  await updateConfig((cfgLocal) => {
+  let target: string | undefined;
+  await updateConfig((cfg, context) => {
+    // `modelRaw` may itself be an alias; resolve it from the fenced snapshot so a
+    // concurrent remap cannot attach the alias to a stale target under a green CAS.
+    const resolved = resolveModelTargetForWrite({
+      cfg,
+      resolveCfg: context.runtimeConfig,
+      modelRaw,
+    });
     const modelKey = `${resolved.provider}/${resolved.model}`;
-    const nextModels = { ...cfgLocal.agents?.defaults?.models };
+    target = modelKey;
+    const nextModels = { ...cfg.agents?.defaults?.models };
     // Model selection folds alias case, so case variants must not collide.
     for (const [key, entry] of Object.entries(nextModels)) {
       const existing = entry?.alias?.trim();
@@ -70,11 +77,11 @@ export async function modelsAliasesAddCommand(
     const existing = nextModels[modelKey] ?? {};
     nextModels[modelKey] = { ...existing, alias };
     return {
-      ...cfgLocal,
+      ...cfg,
       agents: {
-        ...cfgLocal.agents,
+        ...cfg.agents,
         defaults: {
-          ...cfgLocal.agents?.defaults,
+          ...cfg.agents?.defaults,
           models: nextModels,
         },
       },
@@ -82,7 +89,7 @@ export async function modelsAliasesAddCommand(
   });
 
   logConfigUpdated(runtime);
-  runtime.log(`Alias ${alias} -> ${resolved.provider}/${resolved.model}`);
+  runtime.log(`Alias ${alias} -> ${target}`);
 }
 
 /** Removes a configured alias by name. */
