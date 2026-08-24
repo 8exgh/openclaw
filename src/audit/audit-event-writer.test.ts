@@ -31,7 +31,8 @@ function observeNonblockingSqliteTransactions(
   database: DatabaseSync,
   observed: number[],
 ): () => void {
-  const originalExec = database.exec;
+  const originalExecDescriptor = Object.getOwnPropertyDescriptor(database, "exec");
+  const originalExec = database.exec.bind(database);
   database.exec = (sql: string) => {
     if (sql === "BEGIN IMMEDIATE") {
       const busyTimeout = readSqliteBusyTimeout(database);
@@ -40,10 +41,15 @@ function observeNonblockingSqliteTransactions(
         throw new Error(`audit writer attempted a blocking SQLite transaction (${busyTimeout} ms)`);
       }
     }
-    return originalExec.call(database, sql);
+    return originalExec(sql);
   };
   return () => {
-    database.exec = originalExec;
+    if (originalExecDescriptor) {
+      Object.defineProperty(database, "exec", originalExecDescriptor);
+      return;
+    }
+    const ownDatabaseMethod: { exec?: DatabaseSync["exec"] } = database;
+    delete ownDatabaseMethod.exec;
   };
 }
 
@@ -297,7 +303,9 @@ describe("audit event writer", () => {
 
     try {
       await writer.ready;
-      await new Promise<void>((resolve) => setImmediate(resolve));
+      await new Promise<void>((resolve) => {
+        setImmediate(resolve);
+      });
       expect(contender.isTransaction).toBe(true);
       expect(openedBusyTimeout).toBe(0);
       expect(observedBusyTimeouts).not.toHaveLength(0);
@@ -421,7 +429,9 @@ describe("audit event writer", () => {
         accepted: true,
       });
       expect(performance.now() - startedAt).toBeLessThan(250);
-      await new Promise<void>((resolve) => setImmediate(resolve));
+      await new Promise<void>((resolve) => {
+        setImmediate(resolve);
+      });
       expect(contender.isTransaction).toBe(true);
       expect(observedBusyTimeouts).not.toHaveLength(0);
       expect(observedBusyTimeouts.every((busyTimeout) => busyTimeout === 0)).toBe(true);
