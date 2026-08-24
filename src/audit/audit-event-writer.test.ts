@@ -7,6 +7,7 @@ import { tableExists } from "../state/openclaw-state-db-schema-helpers.js";
 import {
   closeOpenClawStateDatabaseForTest,
   openOpenClawStateDatabase,
+  registerOpenClawStateDatabaseLifecycleListener,
 } from "../state/openclaw-state-db.js";
 import { listAuditEvents, recordAuditEvent } from "./audit-event-store.js";
 import type { AuditEventInput } from "./audit-event-types.js";
@@ -25,6 +26,26 @@ import {
   processExecutionIdentityAdmissionWork,
 } from "./execution-identity-context.js";
 import type { TrustedMessageAuditEvent } from "./message-audit-events.js";
+
+function observeNonblockingSqliteTransactions(
+  database: DatabaseSync,
+  observed: number[],
+): () => void {
+  const originalExec = database.exec;
+  database.exec = (sql: string) => {
+    if (sql === "BEGIN IMMEDIATE") {
+      const busyTimeout = readSqliteBusyTimeout(database);
+      observed.push(busyTimeout);
+      if (busyTimeout !== 0) {
+        throw new Error(`audit writer attempted a blocking SQLite transaction (${busyTimeout} ms)`);
+      }
+    }
+    return originalExec.call(database, sql);
+  };
+  return () => {
+    database.exec = originalExec;
+  };
+}
 
 function defineObjectPrototypeProperties(descriptors: PropertyDescriptorMap): void {
   // oxlint-disable-next-line no-extend-native -- Exercise hostile prototype pollution across the real clone boundary.
@@ -262,20 +283,38 @@ describe("audit event writer", () => {
     const contender = new DatabaseSync(path);
     contender.exec("PRAGMA busy_timeout = 0; BEGIN IMMEDIATE");
     const errors: string[] = [];
-    const probeStartedAt = performance.now();
+    const observedBusyTimeouts: number[] = [];
+    let openedBusyTimeout: number | undefined;
+    let restoreExec: (() => void) | undefined;
+    const clearDatabaseListener = registerOpenClawStateDatabaseLifecycleListener((event) => {
+      if (event.kind !== "opened" || event.database.path !== path) {
+        return;
+      }
+      openedBusyTimeout = readSqliteBusyTimeout(event.database.db);
+      restoreExec = observeNonblockingSqliteTransactions(event.database.db, observedBusyTimeouts);
+    });
     const writer = createAuditEventWriter({ stateDir, onError: (error) => errors.push(error) });
 
     try {
-      const eventLoopDelay = await new Promise<number>((resolve) => {
-        setTimeout(() => resolve(performance.now() - probeStartedAt), 25);
-      });
-      expect(eventLoopDelay).toBeLessThan(250);
       await writer.ready;
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(contender.isTransaction).toBe(true);
+      expect(openedBusyTimeout).toBe(0);
+      expect(observedBusyTimeouts).not.toHaveLength(0);
+      expect(observedBusyTimeouts.every((busyTimeout) => busyTimeout === 0)).toBe(true);
       expect(writer.record({ ...input(), sourceId: "cold-owner", runId: "cold-owner" })).toBe(true);
     } finally {
-      contender.exec("ROLLBACK");
-      contender.close();
-      await writer.stop();
+      try {
+        contender.exec("ROLLBACK");
+        contender.close();
+      } finally {
+        try {
+          await writer.stop();
+        } finally {
+          restoreExec?.();
+          clearDatabaseListener();
+        }
+      }
     }
 
     expect(errors).toEqual([]);
@@ -342,6 +381,8 @@ describe("audit event writer", () => {
     db.exec("DELETE FROM audit_identity_keys;");
     const contender = new DatabaseSync(path);
     contender.exec("PRAGMA busy_timeout = 0; BEGIN IMMEDIATE");
+    const observedBusyTimeouts: number[] = [];
+    const restoreExec = observeNonblockingSqliteTransactions(db, observedBusyTimeouts);
     const clearSink = configureExecutionIdentityAdmissionSink(writer.recordExecutionIdentity);
     const admittedAt = Date.now();
 
@@ -380,11 +421,10 @@ describe("audit event writer", () => {
         accepted: true,
       });
       expect(performance.now() - startedAt).toBeLessThan(250);
-      const eventLoopProbeStartedAt = performance.now();
-      const eventLoopDelay = await new Promise<number>((resolve) => {
-        setTimeout(() => resolve(performance.now() - eventLoopProbeStartedAt), 25);
-      });
-      expect(eventLoopDelay).toBeLessThan(250);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(contender.isTransaction).toBe(true);
+      expect(observedBusyTimeouts).not.toHaveLength(0);
+      expect(observedBusyTimeouts.every((busyTimeout) => busyTimeout === 0)).toBe(true);
       expect(readSqliteBusyTimeout(db)).toBe(5_000);
       expect(
         writer.recordExecutionIdentity({
@@ -411,7 +451,11 @@ describe("audit event writer", () => {
         contender.close();
       } finally {
         clearSink();
-        await writer.stop();
+        try {
+          await writer.stop();
+        } finally {
+          restoreExec();
+        }
       }
     }
 
