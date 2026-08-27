@@ -247,7 +247,7 @@ export function applyDefaultModelPrimaryUpdate(params: {
   field: "model" | "imageModel";
   resolvedTarget?: { provider: string; model: string };
 }): OpenClawConfig {
-  const resolved = params.resolvedTarget ?? resolveModelTargetForWrite(params);
+  const resolved = params.resolvedTarget ?? resolveDefaultModelPrimaryTarget(params);
   const nextModels = {
     ...params.cfg.agents?.defaults?.models,
   } as Record<string, AgentModelEntryConfig>;
@@ -271,13 +271,7 @@ export function applyDefaultModelPrimaryUpdate(params: {
   };
 }
 
-/**
- * Resolves a CLI model ref for a config write. Authored aliases in the source
- * config win; otherwise the runtime config resolves built-in aliases that only
- * exist after defaults are applied. Call from inside `updateConfig` so the
- * target comes from the same snapshot whose hash fences the write.
- */
-export function resolveModelTargetForWrite(params: {
+function resolveDefaultModelPrimaryTarget(params: {
   cfg: OpenClawConfig;
   resolveCfg?: OpenClawConfig;
   modelRaw: string;
@@ -295,7 +289,7 @@ export async function updateDefaultModelPrimaryConfig(params: {
 }): Promise<{ updated: OpenClawConfig; warning?: string }> {
   let warning: string | undefined;
   const updated = await updateConfig((cfg, context) => {
-    const resolvedTarget = resolveModelTargetForWrite({
+    const resolvedTarget = resolveDefaultModelPrimaryTarget({
       cfg,
       resolveCfg: context.runtimeConfig,
       modelRaw: params.modelRaw,
